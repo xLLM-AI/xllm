@@ -28,9 +28,9 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/batch/batch_factory.h"
-#include "core/framework/block/block_manager_pool.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/kv_cache/manager/kv_cache_manager.h"
 #include "core/runtime/options.h"
 #include "core/scheduler/profile/decode_graph_warmup_plan.h"
 #include "core/scheduler/profile/time_predictor.h"
@@ -271,7 +271,7 @@ class ProfileManager {
 
   DecodeGraphWarmupPlan decode_graph_warmup_plan_;
 
-  BlockManagerPool* block_manager_pool_;
+  KVCacheManager* kv_cache_manager_;
 
   int32_t profile_length_step_ = 256;
 

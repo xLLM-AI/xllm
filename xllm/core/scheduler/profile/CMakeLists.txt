@@ -18,6 +18,7 @@ cc_library(
     :batch
     :distributed_runtime
     :request
+    :kv_cache_manager_interface
     :runtime
     :platform
     glog::glog

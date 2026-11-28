@@ -19,7 +19,6 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "engine.h"
 #include "framework/batch/batch_group.h"
-#include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
@@ -48,8 +47,8 @@ class SpeculativeEngineBase : public Engine {
 
   const Tokenizer* tokenizer() const override { return engine_->tokenizer(); }
 
-  BlockManagerPool* block_manager_pool() const override {
-    return engine_->block_manager_pool();
+  KVCacheManager* kv_cache_manager() const override {
+    return engine_->kv_cache_manager();
   }
 
   const ModelArgs& model_args() const override { return model_args_; }

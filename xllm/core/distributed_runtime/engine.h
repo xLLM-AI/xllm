@@ -20,7 +20,7 @@ limitations under the License.
 #include <memory>
 
 #include "common/types.h"
-#include "framework/block/block_manager_pool.h"
+#include "core/kv_cache/manager/kv_cache_manager.h"
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
@@ -39,13 +39,9 @@ class Engine {
   // return the tokenizer
   virtual const Tokenizer* tokenizer() const { return tokenizer_.get(); }
 
-  // return the block manager
-  virtual BlockManagerPool* block_manager_pool() const {
-    auto p = reinterpret_cast<BlockManagerPool*>(kv_cache_manager_.get());
-    if (!p) {
-      LOG(FATAL) << "kv_cache_manager_ is not BlockManagerPool type!";
-    }
-    return p;
+  // The initialized engine owns the manager throughout scheduler use.
+  virtual KVCacheManager* kv_cache_manager() const {
+    return kv_cache_manager_.get();
   }
 
   // return the model args
@@ -74,8 +70,7 @@ class Engine {
   // Tokenizer args
   TokenizerArgs tokenizer_args_;
 
-  // kv cache manager
-  // support `block manager` and `virtual memory manager` currently.
+  // Request-cache coordination selected by KVCacheManagerFactory.
   std::unique_ptr<KVCacheManager> kv_cache_manager_;
 
   // tokenizer

@@ -43,6 +43,7 @@ cc_binary(
     kv_cache_event_fixture.cpp
   DEPS
     :block
+    :kv_cache_manager
     :kv_cache_events
     :xllm_server
 )

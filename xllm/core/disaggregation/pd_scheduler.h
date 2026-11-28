@@ -50,13 +50,6 @@ inline constexpr int32_t kDecodeAddNewPromptTooLongStatusCode = 413;
 
 bool is_permanent_rejection(int32_t status_code);
 
-// Flat KV managers reserve block 0 for padding, so only num_blocks - 1 blocks
-// can belong to a request. Returns true only when the prompt can never fit,
-// independent of current cache pressure.
-bool exceeds_decode_capacity(size_t num_prompt_tokens,
-                             size_t block_size,
-                             size_t num_blocks);
-
 bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response);
 
 class PDScheduler : public ContinuousScheduler<> {

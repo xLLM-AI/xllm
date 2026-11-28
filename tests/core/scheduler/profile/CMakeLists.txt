@@ -8,6 +8,7 @@ cc_test(
   DEPS
     :xllm_server
     :block
+    :kv_cache_manager
     :profile
     :platform
     :request

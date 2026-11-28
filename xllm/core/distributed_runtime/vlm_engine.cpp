@@ -45,12 +45,12 @@ limitations under the License.
 #include "core/framework/model_loader/model_loader.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/manager/kv_cache_manager_factory.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/host_cache_layout.h"
 #include "core/runtime/forward_input_encoding.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/tensor_options.h"
-#include "framework/block/kv_cache_manager_factory.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "platform/platform.h"
@@ -345,7 +345,7 @@ bool VLMEngine::allocate_kv_cache(
   };
 
   // initialize block manager
-  BlockManagerPool::Options options;
+  KVCacheManagerOptions options;
   options.num_blocks(kv_cache_cap.n_blocks())
       .kv_events_config(options_.is_draft_engine()
                             ? std::string()

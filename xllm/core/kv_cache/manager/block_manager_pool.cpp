@@ -13,19 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/block/block_manager_pool.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
 
 #include <algorithm>
 #include <limits>
 
-#include "core/framework/block/composite_block_manager.h"
-#include "core/framework/block/vmm_kv_block_manager.h"
+#include "core/framework/block/embedding_block_manager.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/events/kv_cache_event_publisher.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
+#include "core/kv_cache/manager/composite_block_manager.h"
+#include "core/kv_cache/storage/vmm_kv_page_allocator.h"
 #include "framework/model/model_params_view.h"
+#include "util/utils.h"
 
 namespace xllm {
 
@@ -58,7 +60,7 @@ BlockManagerPool::BlockManagerPool(
   CHECK(dp_size > 0) << "dp_size must be greater than 0";
   if (paged_partition_.has_value()) {
     CHECK(options_.grouped_partitions().empty());
-    // The pool construction adapter is the only partition-to-legacy-options
+    // The manager construction adapter is the only partition-to-legacy-options
     // bridge. Remove it when all leaf constructors accept their own cache
     // descriptions.
     options_.block_size(paged_partition_->token_stride())
@@ -518,7 +520,7 @@ void BlockManagerPool::publish_prefix(Sequence* sequence, size_t num_tokens) {
   block_managers_[dp_rank]->publish_prefix(sequence, num_tokens);
 }
 
-float BlockManagerPool::get_gpu_cache_usage_perc() const {
+float BlockManagerPool::average_cache_utilization() const {
   float perc = 0.0;
   for (int32_t i = 0; i < block_managers_.size(); ++i) {
     perc += block_managers_[i]->kv_cache_utilization();
@@ -606,8 +608,37 @@ double BlockManagerPool::kv_cache_utilization() const {
   return min_utilization;
 }
 
-// currently use only for profile, which not need prefix cache.
-// If more often used in the future, can be integrated into deallocate function.
+bool BlockManagerPool::allocate_for_profiling(Sequence* sequence,
+                                              size_t num_tokens) {
+  // Deliberately use local growth even for a Host-backed manager. Profiling
+  // prepares synthetic inputs and must not enqueue Host restores.
+  return BlockManagerPool::allocate(sequence, num_tokens);
+}
+
+bool exceeds_decode_capacity(size_t num_prompt_tokens,
+                             size_t block_size,
+                             size_t num_blocks) {
+  if (block_size == 0) {
+    return true;
+  }
+  const size_t needed_blocks = util::ceil_div(num_prompt_tokens, block_size);
+  const size_t usable_blocks = num_blocks == 0 ? 0 : num_blocks - 1;
+  return needed_blocks > usable_blocks;
+}
+
+bool BlockManagerPool::exceeds_decode_capacity(Sequence* sequence) const {
+  CHECK(sequence != nullptr);
+  if (options_.enable_vmm_kvcache() || !options_.grouped_partitions().empty() ||
+      (options_.enable_host_offload() && !options_.instance_is_decode())) {
+    return false;
+  }
+  if (options_.enable_shared_kv_cache()) {
+    return exceeds_total_capacity(sequence, sequence->num_prompt_tokens());
+  }
+  return ::xllm::exceeds_decode_capacity(
+      sequence->num_prompt_tokens(), block_size(), num_blocks());
+}
+
 void BlockManagerPool::deallocate_without_cache(Sequence* sequence) {
   DCHECK(sequence != nullptr);
   sequence->reset();

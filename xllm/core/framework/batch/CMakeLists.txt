@@ -78,6 +78,7 @@ cc_binary(
   DEPS
     :config
     :batch
+    :kv_cache_manager
     :worker_model_codec
     torch
     benchmark::benchmark

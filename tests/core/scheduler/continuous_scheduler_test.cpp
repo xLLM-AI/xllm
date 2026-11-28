@@ -27,6 +27,7 @@
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/scheduler/scheduler_notifier_test_peer.h"
 #include "core/util/tensor_helper.h"
@@ -248,7 +249,7 @@ class FakeEngine : public Engine {
     NOT_IMPLEMENTED();
   }
   const Tokenizer* tokenizer() const { return fake_tokenizer_.get(); }
-  BlockManagerPool* block_manager_pool() const {
+  BlockManagerPool* kv_cache_manager() const override {
     return fake_block_manager_.get();
   }
   const ModelArgs& model_args() const { return model_args_; }
@@ -786,7 +787,7 @@ TEST(EnginePrefixCacheTest, FullAttentionDecodeStillReusesKvPrefixes) {
   ScopedConfigValue<bool> vmm_kvcache(
       KVCacheConfig::get_instance().enable_vmm_kvcache(), false);
   FakeEngine engine(32, 4, true, false, InstanceRole::DECODE);
-  BlockManagerPool* pool = engine.block_manager_pool();
+  BlockManagerPool* pool = engine.kv_cache_manager();
   const std::vector<int32_t> prompt{1, 2, 3, 4, 5, 6, 7, 8};
   auto first_request = generate_request_with_prompt_tokens(prompt, 4, 32);
   Sequence* first_sequence = first_request->sequences().front().get();
@@ -811,7 +812,7 @@ TEST(ContinuousSchedulerTest, InBatchPrefixCacheUsesGlobalConfig) {
     ScopedConfigValue<bool> global_prefix_cache(
         KVCacheConfig::get_instance().enable_prefix_cache(), global_enabled);
     FakeEngine engine(32, 4, global_enabled);
-    EXPECT_EQ(engine.block_manager_pool()->options().enable_prefix_cache(),
+    EXPECT_EQ(engine.kv_cache_manager()->options().enable_prefix_cache(),
               global_enabled);
     for (const bool in_batch_enabled : {false, true}) {
       ScopedConfigValue<bool> in_batch_prefix_cache(
@@ -880,7 +881,7 @@ TEST(ContinuousSchedulerTest, CancelledOverlapRequestReleasesBeforeResult) {
     request->state().enable_schedule_overlap = true;
     request->state().output_func = [](const RequestOutput&) { return true; };
     const size_t initial_free_blocks =
-        engine.block_manager_pool()->num_free_blocks().front();
+        engine.kv_cache_manager()->num_free_blocks().front();
     scheduler.add_request(request);
     scheduler.step(absl::ZeroDuration());
     Sequence* sequence = request->sequences().front().get();
@@ -892,7 +893,7 @@ TEST(ContinuousSchedulerTest, CancelledOverlapRequestReleasesBeforeResult) {
     EXPECT_EQ(engine.completed_batches(), 1u);
     EXPECT_EQ(std::vector<int32_t>(sequence->tokens()), tokens);
     EXPECT_EQ(sequence->kv_cache_tokens_num(), 0u);
-    EXPECT_EQ(engine.block_manager_pool()->num_free_blocks().front(),
+    EXPECT_EQ(engine.kv_cache_manager()->num_free_blocks().front(),
               initial_free_blocks);
     scheduler.wait_for_responses();
   }
@@ -912,7 +913,7 @@ TEST(ContinuousSchedulerTest,
     FakeEngine engine(/*num_blocks=*/64, /*block_size=*/4);
     TestableContinuousScheduler scheduler(&engine, options);
     const std::vector<size_t> initial_free_blocks =
-        engine.block_manager_pool()->num_free_blocks();
+        engine.kv_cache_manager()->num_free_blocks();
 
     std::vector<std::shared_ptr<Request>> requests;
     requests.reserve(3);
@@ -970,7 +971,7 @@ TEST(ContinuousSchedulerTest,
     ASSERT_EQ(batches.size(), 1u);
     EXPECT_TRUE(batches.front().empty());
     scheduler.wait_for_responses();
-    EXPECT_EQ(engine.block_manager_pool()->num_free_blocks(),
+    EXPECT_EQ(engine.kv_cache_manager()->num_free_blocks(),
               initial_free_blocks);
   }
 }
@@ -1237,7 +1238,7 @@ TEST(ContinuousSchedulerTest,
         return true;
       };
       const size_t free_blocks =
-          engine.block_manager_pool()->num_free_blocks().front();
+          engine.kv_cache_manager()->num_free_blocks().front();
       EXPECT_TRUE(scheduler.add_request(request));
       scheduler.drain_prefetch_for_test();
       scheduler.wait_for_responses();
@@ -1255,7 +1256,7 @@ TEST(ContinuousSchedulerTest,
         EXPECT_EQ(scheduler.scheduler_queue_size(), 1u);
         EXPECT_EQ(engine.prefetch_calls(), 1u);
       }
-      EXPECT_EQ(engine.block_manager_pool()->num_free_blocks().front(),
+      EXPECT_EQ(engine.kv_cache_manager()->num_free_blocks().front(),
                 free_blocks);
       EXPECT_FALSE(request->sequences().front()->has_any_blocks());
       EXPECT_FALSE(request->sequences().front()->has_linear_state_slot());
@@ -1718,7 +1719,7 @@ TEST(SchedulerFactoryTest, PDChunkedPrefillUsesPD) {
 
 TEST(BlockManagerPoolTest, AllocateFailureRollsBackSharedPrefixBlocks) {
   auto engine = std::make_unique<FakeEngine>(3, 4, true);
-  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+  BlockManagerPool* block_manager_pool = engine->kv_cache_manager();
 
   auto cached_request =
       generate_request_with_prompt_tokens({1, 2, 3, 4, 5, 6, 7, 8}, 1, 30000);
@@ -1808,7 +1809,7 @@ TEST(ContinuousSchedulerTest,
       std::make_unique<FakeEngine>(32, 4, /*enable_prefix_cache=*/true);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+  BlockManagerPool* block_manager_pool = engine->kv_cache_manager();
 
   constexpr size_t kBestOf = 4;
   constexpr size_t kN = 2;
@@ -1860,7 +1861,7 @@ TEST(ContinuousSchedulerTest, PDDecodeBestOfOneSkipsExpansionAndShares) {
       std::make_unique<FakeEngine>(32, 4, /*enable_prefix_cache=*/false);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+  BlockManagerPool* block_manager_pool = engine->kv_cache_manager();
 
   ASSERT_TRUE(block_manager_pool->try_allocate(seq0));
   ASSERT_EQ(seq0->kv_state().kv_cache_tokens_num(), seq0->num_prompt_tokens());
@@ -1890,7 +1891,7 @@ TEST(ContinuousSchedulerTest, RejectedStreamCancelsAtSchedulingBoundary) {
   auto engine = std::make_unique<FakeEngine>(32, 4);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+  BlockManagerPool* block_manager_pool = engine->kv_cache_manager();
   const size_t initial_free_blocks =
       util::max(block_manager_pool->num_free_blocks());
 
@@ -1996,7 +1997,7 @@ TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
   auto engine = std::make_unique<FakeEngine>(32, 4);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+  BlockManagerPool* block_manager_pool = engine->kv_cache_manager();
 
   std::vector<std::shared_ptr<Request>> requests = generate_request(
       {4, 4}, {4, 4}, std::nullopt, std::nullopt, std::nullopt, 30000);
@@ -2148,7 +2149,7 @@ TEST(ContinuousSchedulerTest, InBatchCacheReusesPartialPrefixWithinSameBatch) {
         second_request->sequences()[0]->kv_state().shared_blocks_num(
             BlockType::KV);
     r.prefix_cache_blocks =
-        engine->block_manager_pool()->num_blocks_in_prefix_cache()[0];
+        engine->kv_cache_manager()->num_blocks_in_prefix_cache()[0];
 
     scheduler.reset();
     // Leak the engine: published blocks live in the prefix-cache table at
@@ -2204,7 +2205,7 @@ TEST(ContinuousSchedulerTest,
       KVCacheConfig::get_instance().enable_prefix_cache(), true);
   auto engine = std::make_unique<FakeEngine>(
       kNumBlocks, kBlockSize, /*enable_prefix_cache=*/true);
-  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+  BlockManagerPool* block_manager_pool = engine->kv_cache_manager();
 
   // PrefillOnly behavior: enable_chunked_prefill=true, num_speculative_tokens>0
   // gives enable_mix_batch=false + enable_chunked_prefill=true.

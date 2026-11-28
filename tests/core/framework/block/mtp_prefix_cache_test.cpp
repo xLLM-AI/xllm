@@ -21,10 +21,10 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/batch_group.h"
-#include "core/framework/block/composite_block_manager.h"
-#include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/kv_cache/manager/composite_block_manager.h"
+#include "core/kv_cache/manager/hierarchy_block_manager_pool.h"
 #include "core/kv_cache/transfer/kv_transfer_coordinator_base.h"
 #include "framework/block/grouped_cache_test_utils.h"
 

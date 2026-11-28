@@ -22,7 +22,7 @@ limitations under the License.
 #include <string>
 
 #include "common/metrics.h"
-#include "framework/block/kv_cache_manager.h"
+#include "core/kv_cache/manager/kv_cache_manager.h"
 
 namespace xllm {
 

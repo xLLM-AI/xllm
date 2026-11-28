@@ -36,13 +36,13 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/kv_cache/manager/kv_cache_manager.h"
 #include "core/kv_cache/transfer/pd_topology_guard.h"
 #include "core/util/scope_guard.h"
 #include "core/util/tensor_codec.h"
 #include "disagg_pd.pb.h"
 #include "distributed_runtime/engine.h"
 #include "distributed_runtime/xservice_client.h"
-#include "framework/block/block_manager_pool.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
 #include "framework/request/sequence.h"
@@ -150,17 +150,6 @@ void send_reservation_release(const std::string& req_id,
 bool is_permanent_rejection(int32_t status_code) {
   return status_code == kDecodeAddNewInvalidRequestStatusCode ||
          status_code == kDecodeAddNewPromptTooLongStatusCode;
-}
-
-bool exceeds_decode_capacity(size_t num_prompt_tokens,
-                             size_t block_size,
-                             size_t num_blocks) {
-  if (block_size == 0) {
-    return true;
-  }
-  const size_t needed_blocks = util::ceil_div(num_prompt_tokens, block_size);
-  const size_t usable_blocks = num_blocks == 0 ? 0 : num_blocks - 1;
-  return needed_blocks > usable_blocks;
 }
 
 bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response) {
@@ -962,7 +951,7 @@ void PDScheduler::complete_request_block_release(RequestBlockRelease& release) {
       if (sequence == nullptr) {
         continue;
       }
-      engine_->block_manager_pool()->deallocate_without_cache(sequence.get());
+      kv_cache_manager_->deallocate_without_cache(sequence.get());
     }
   }
   release.completion.set_value();
@@ -1260,24 +1249,7 @@ bool PDScheduler::try_allocate(Sequence* sequence) {
 }
 
 bool PDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
-  CHECK(sequence != nullptr);
-  const BlockManagerPool* block_manager = engine_->block_manager_pool();
-  CHECK(block_manager != nullptr);
-  const BlockManagerPool::Options& block_options = block_manager->options();
-  if (block_options.enable_vmm_kvcache() ||
-      !block_options.grouped_partitions().empty() ||
-      (block_options.enable_host_offload() &&
-       options_.instance_role() != InstanceRole::DECODE)) {
-    return false;
-  }
-  if (block_options.enable_shared_kv_cache()) {
-    return block_manager->exceeds_total_capacity(sequence,
-                                                 sequence->num_prompt_tokens());
-  }
-  return ::xllm::exceeds_decode_capacity(
-      sequence->num_prompt_tokens(),
-      static_cast<size_t>(block_manager->block_size()),
-      static_cast<size_t>(block_manager->num_blocks()));
+  return kv_cache_manager_->exceeds_decode_capacity(sequence);
 }
 
 void PDScheduler::do_permanent_rejection(

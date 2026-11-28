@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/block/hierarchy_block_manager_pool.h"
+#include "core/kv_cache/manager/hierarchy_block_manager_pool.h"
 
 #include <folly/futures/Future.h>
 #include <gtest/gtest.h>
@@ -34,10 +34,10 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/sliding_window_block_manager.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
+#include "core/kv_cache/manager/composite_block_manager.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
 #include "core/util/scope_guard.h"
-#include "framework/block/block_manager_pool.h"
-#include "framework/block/composite_block_manager.h"
 #include "framework/block/grouped_cache_test_utils.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -630,6 +630,32 @@ TEST_F(HierarchyBlockManagerPoolTest,
 }
 
 }  // namespace
+
+TEST_F(HierarchyBlockManagerPoolTest,
+       ManagerProfilingUsesDeviceGrowthWithoutHostRestore) {
+  BlockManagerPool::Options options = make_flat_kv_options();
+  options.block_size(4).enable_host_offload(true).instance_is_decode(false);
+  HierarchyBlockManagerPool pool(options,
+                                 /*transfer_coordinator=*/nullptr,
+                                 /*dp_size=*/1);
+  KVCacheManager& manager = pool;
+  BlockManager* host_leaf =
+      HierarchyPoolTestPeer::host_leaves(pool).at(BlockType::KV).leaf;
+  const std::vector<int32_t> tokens(8, 61);
+  seed_host_prefix(host_leaf, tokens);
+  Sequence sequence = make_test_sequence(/*index=*/0, tokens);
+
+  ASSERT_TRUE(manager.allocate_for_profiling(&sequence, tokens.size()));
+  EXPECT_TRUE(sequence.kv_state().has_any_blocks());
+  EXPECT_FALSE(sequence.host_kv_state().has_any_blocks());
+  EXPECT_TRUE(HierarchyPoolTestPeer::pending_load_infos(pool).empty());
+  sequence.kv_state().set_kv_cache_tokens_num(tokens.size());
+  manager.deallocate_without_cache(&sequence);
+  EXPECT_FALSE(sequence.has_any_blocks());
+  EXPECT_EQ(manager.num_blocks_in_prefix_cache(), (std::vector<size_t>{0}));
+  EXPECT_TRUE(HierarchyPoolTestPeer::pending_load_infos(pool).empty());
+  EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 0u);
+}
 
 // A flat KV layout still creates a single KV host leaf. num_total_blocks
 // reports one less than the raw count because block id 0 is reserved as a

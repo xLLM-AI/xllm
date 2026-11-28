@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/block/composite_block_manager.h"
+#include "core/kv_cache/manager/composite_block_manager.h"
 
 #include <gtest/gtest.h>
 
@@ -30,9 +30,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/batch/batch.h"
-#include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/embedding_block_manager.h"
-#include "core/framework/block/kv_cache_manager.h"
 #include "core/framework/block/vmm_kv_block_manager.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
@@ -40,6 +38,8 @@ limitations under the License.
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/block/static_kv_block_pool.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
+#include "core/kv_cache/manager/kv_cache_manager.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
 #include "framework/block/grouped_cache_test_utils.h"
 #include "framework/request/request.h"

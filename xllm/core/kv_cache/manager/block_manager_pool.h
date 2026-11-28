@@ -16,18 +16,16 @@ limitations under the License.
 #pragma once
 
 #include <atomic>
-#include <map>
 #include <optional>
-#include <queue>
 #include <string>
 #include <vector>
 
-#include "core/framework/block/composite_block_manager.h"
 #include "core/kv_cache/events/kv_cache_event_publisher.h"
 #include "core/kv_cache/layout/paged_cache_partition.h"
 #include "core/kv_cache/layout/recurrent_cache_partition.h"
-#include "framework/block/embedding_block_manager.h"
-#include "framework/block/kv_cache_manager.h"
+#include "core/kv_cache/manager/composite_block_manager.h"
+#include "core/kv_cache/manager/kv_cache_manager.h"
+#include "core/kv_cache/manager/kv_cache_manager_options.h"
 
 namespace xllm {
 
@@ -35,57 +33,8 @@ class VmmKVPageAllocator;
 
 class BlockManagerPool : public KVCacheManager {
  public:
-  using HostBlockCounts = std::map<BlockType, uint32_t>;
-
-  struct Options {
-    // Empty for caches that must not publish, including external draft caches.
-    PROPERTY(std::string, kv_events_config);
-    PROPERTY(std::shared_ptr<KVCacheEventJournal>, event_journal);
-    PROPERTY(uint32_t, num_blocks) = 0;
-    PROPERTY(uint32_t, host_num_blocks) = 0;
-    // Host prefix-cache capacity keyed by the cache block type. Empty keeps the
-    // legacy flat-KV behavior and uses host_num_blocks for BlockType::KV.
-    PROPERTY(HostBlockCounts, host_num_blocks_by_type) = {};
-    PROPERTY(int32_t, block_size) = 0;
-    PROPERTY(bool, enable_linear_state) = false;
-    // Total physical state slots [0, N) for the unified GDN/KPool slot pool
-    // (= num_linear_state_blocks). Only used when enable_linear_state is true.
-    PROPERTY(int32_t, linear_state_num_slots) = 0;
-    // Effective prefill chunk size used as the state checkpoint interval.
-    PROPERTY(int32_t, linear_state_chunk_stride) = -1;
-    PROPERTY(bool, enable_prefix_cache) = true;
-    PROPERTY(bool, enable_disagg_pd) = false;
-    PROPERTY(bool, enable_kvcache_store) = false;
-    // Host prefix-cache offload (host_blocks_factor > 1). Wraps composite
-    // leaves in ConcurrentBlockManagerImpl so the async D2H offload callback
-    // can free blocks off-thread safely.
-    PROPERTY(bool, enable_host_offload) = false;
-    PROPERTY(bool, enable_vmm_kvcache) = false;
-    PROPERTY(bool, enable_shared_kv_cache) = false;
-    PROPERTY(uint32_t, shared_linear_state_slots) = 1;
-    PROPERTY(std::shared_ptr<const StaticKVLayout>, shared_layout);
-    PROPERTY(int64_t,
-             num_layers) = 0;  // Required when enable_vmm_kvcache is true
-    PROPERTY(int64_t,
-             slot_size) = 0;  // Memory size per slot (for virtual memory)
-    PROPERTY(size_t, virtual_block_bytes) = 0;
-    PROPERTY(std::string, model_id);  // Model ID for multi-model support
-    // Base SWA/cache-state block rows retained per sequence.
-    PROPERTY(uint32_t, swa_blocks_per_seq) = 0;
-    // Total physical SWA rows. This is computed by the KV cache estimator and
-    // shared with the device tensor shape to keep both id spaces identical.
-    PROPERTY(uint32_t, swa_num_blocks) = 0;
-    // Scheduler token budget used to size the shared SWA burst pool.
-    PROPERTY(uint32_t, max_tokens_per_batch) = 0;
-    // For CompositeBlockManager.
-    PROPERTY(std::vector<PagedCachePartition>, grouped_partitions) = {};
-    PROPERTY(uint32_t, max_seqs_per_batch) = 0;
-    // Hasher type bound to the engine (TEXT for LLM, MM for VLM).
-    PROPERTY(BlockHasherType, hasher_type) = BlockHasherType::TEXT;
-    PROPERTY(uint32_t, num_embedding_blocks) = 0;
-    PROPERTY(uint32_t, num_speculative_tokens) = 0;
-    PROPERTY(bool, instance_is_decode) = false;
-  };
+  using Options = KVCacheManagerOptions;
+  using HostBlockCounts = Options::HostBlockCounts;
 
   explicit BlockManagerPool(
       const Options& options,
@@ -95,7 +44,7 @@ class BlockManagerPool : public KVCacheManager {
       std::optional<RecurrentCachePartition> recurrent_partition =
           std::nullopt);
 
-  ~BlockManagerPool() = default;
+  ~BlockManagerPool() override = default;
 
   bool allocate(Sequence* sequence) override;
   bool allocate(std::vector<Sequence*>& sequences) override;
@@ -114,13 +63,19 @@ class BlockManagerPool : public KVCacheManager {
   void deallocate(std::vector<Sequence*>& sequences) override;
   void deallocate(Sequence* sequence) override;
 
-  void deallocate_without_cache(Sequence* sequence);
+  bool allocate_for_profiling(Sequence* sequence, size_t num_tokens) override;
+  void deallocate_without_cache(Sequence* sequence) override;
+  bool exceeds_decode_capacity(Sequence* sequence) const override;
+  bool uses_virtual_memory() const override {
+    return options_.enable_vmm_kvcache();
+  }
+  const std::string& model_id() const override { return options_.model_id(); }
 
   void allocate_shared(Sequence* sequence) override;
   void publish_prefix(Sequence* sequence) override;
   void publish_prefix(Sequence* sequence, size_t num_tokens) override;
 
-  virtual float get_gpu_cache_usage_perc() const;
+  float average_cache_utilization() const override;
 
   uint32_t num_blocks() const override;
   size_t block_resource_units(BlockType type, size_t count) const override;

@@ -32,10 +32,10 @@ limitations under the License.
 #include "core/disaggregation/pd_scheduler.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/engine.h"
-#include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/request/request_output.h"
+#include "core/kv_cache/manager/kv_cache_manager.h"
 #include "core/util/tensor_codec.h"
 #include "util/utils.h"
 
@@ -63,7 +63,7 @@ PDServiceImpl::PDServiceImpl(PDScheduler* scheduler,
       engine_(engine),
       response_options_(std::move(response_options)),
       xservice_client_(XServiceClient::get_instance()),
-      block_manager_(engine->block_manager_pool()) {
+      kv_cache_manager_(engine->kv_cache_manager()) {
   if (!xservice_client_->initialize_done()) {
     LOG(FATAL) << "XServiceClient not init.";
     return;
@@ -201,16 +201,15 @@ bool PDServiceImpl::append_virtual_kv_offsets(
     const std::string& request_id,
     const std::vector<int32_t>& block_ids,
     proto::DisaggResponse* response) {
-  if (block_manager_ == nullptr ||
-      !block_manager_->options().enable_vmm_kvcache() || block_ids.empty()) {
+  if (kv_cache_manager_ == nullptr ||
+      !kv_cache_manager_->uses_virtual_memory() || block_ids.empty()) {
     return true;
   }
 
   std::vector<VirtualKVCacheLayerGlobalOffsets> layer_offsets;
-  const auto& block_options = block_manager_->options();
   const bool offsets_available =
       DistributedVmmCoordinator::get_instance().get_virtual_kv_offsets(
-          dp_rank, block_options.model_id(), block_ids, layer_offsets);
+          dp_rank, kv_cache_manager_->model_id(), block_ids, layer_offsets);
   if (!offsets_available) {
     LOG(ERROR) << "Failed to get VirtualMemory offsets for request "
                << request_id;
@@ -288,8 +287,7 @@ void PDServiceImpl::decode_recv_new_requests(
         sequence->kv_state(),
         has_linear_attention_layers(engine_->model_args()),
         resp,
-        block_manager_ != nullptr &&
-                block_manager_->options().enable_vmm_kvcache()
+        kv_cache_manager_ != nullptr && kv_cache_manager_->uses_virtual_memory()
             ? &virtual_memory_block_ids
             : nullptr);
     if (!append_virtual_kv_offsets(sequence->dp_rank(),

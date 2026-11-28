@@ -55,6 +55,7 @@ cc_library(
 )
 
 add_subdirectory(block)
+add_subdirectory(manager)
 add_subdirectory(events)
 add_subdirectory(prefix)
 add_subdirectory(transfer)

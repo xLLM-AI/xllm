@@ -40,9 +40,9 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "distributed_runtime/engine.h"
-#include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "util/utils.h"
 
@@ -112,7 +112,7 @@ class FakeEngine : public Engine {
     NOT_IMPLEMENTED();
   }
   const Tokenizer* tokenizer() const { return fake_tokenizer_.get(); }
-  BlockManagerPool* block_manager_pool() const {
+  BlockManagerPool* kv_cache_manager() const override {
     return fake_block_manager_.get();
   }
   const ModelArgs& model_args() const override { return model_args_; }
@@ -647,7 +647,7 @@ TEST(SchedulerWarmupTest, ForwardsInstanceModeToProfileManager) {
           .instance_role(InstanceRole::DECODE);
       TestableContinuousScheduler scheduler(&engine, options);
       EXPECT_EQ(engine.steps(), graph && !disabled ? 2 : 0);
-      EXPECT_EQ(engine.block_manager_pool()->num_used_blocks(),
+      EXPECT_EQ(engine.kv_cache_manager()->num_used_blocks(),
                 (std::vector<size_t>{0}));
     }
   }
@@ -784,7 +784,7 @@ TEST(SchedulerPolicyTest, PrioritySettingsOverrideConflictingGlobals) {
 
       EXPECT_EQ(request->urgency(), expected_urgency);
       EXPECT_EQ(request->is_starved(), expected_starved);
-      engine.block_manager_pool()->deallocate(request.get());
+      engine.kv_cache_manager()->deallocate(request.get());
     }
   }
 }
@@ -797,7 +797,7 @@ TEST(SchedulerPolicyTest, PrefillPlanningUsesExplicitSplitAndMatchFrequency) {
   FakeEngine engine(/*num_blocks=*/64,
                     /*block_size=*/16,
                     /*enable_prefix_cache=*/true);
-  BlockManagerPool* pool = engine.block_manager_pool();
+  BlockManagerPool* pool = engine.kv_cache_manager();
   auto requests =
       generate_request({1024, 1024}, {1, 1}, std::nullopt, std::nullopt, 2048);
   Sequence* sequence = requests[0]->sequences().front().get();
@@ -886,7 +886,7 @@ TEST(SchedulerPolicyTest, AdmissionThresholdOverridesConflictingGlobal) {
       ASSERT_EQ(batches.size(), 1u);
       EXPECT_EQ(batches.front().size(), threshold == 0.5 ? 1u : 2u);
       for (const auto& request : requests) {
-        engine.block_manager_pool()->deallocate(request.get());
+        engine.kv_cache_manager()->deallocate(request.get());
       }
     }
   }
@@ -959,6 +959,15 @@ TEST(SchedulerPolicyTest, PrefillBudgetUsesInjectedFairAndChunkSwitches) {
                         /*enable_prefix_cache=*/false,
                         /*dp_size=*/3);
       TestableContinuousScheduler scheduler(&engine, options);
+      // Keep DP 0 as the real manager's preferred rank. Fresh chunked
+      // admission selects a rank again instead of retaining set_dp_rank().
+      auto occupied_ranks =
+          generate_request({64, 64}, {1, 1}, std::nullopt, std::nullopt, 128);
+      for (size_t i = 0; i < occupied_ranks.size(); ++i) {
+        Sequence* sequence = occupied_ranks[i]->sequences().front().get();
+        sequence->set_dp_rank(static_cast<int32_t>(i + 1));
+        ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
+      }
       auto requests = generate_request(
           {30, 30, 30}, {1, 1, 1}, std::nullopt, std::nullopt, 128);
       for (auto& request : requests) {
@@ -1044,10 +1053,10 @@ TEST(SchedulerPolicyTest, UnifiedPrefixHitIncludesScheduledSuffixCapacity) {
   auto cached_requests =
       generate_request({kPrefixTokens}, {1}, std::nullopt, std::nullopt, 10000);
   Sequence* cached_sequence = cached_requests[0]->sequences()[0].get();
-  ASSERT_TRUE(engine->block_manager_pool()->allocate(cached_sequence));
+  ASSERT_TRUE(engine->kv_cache_manager()->allocate(cached_sequence));
   cached_sequence->kv_state().set_kv_cache_tokens_num(kPrefixTokens);
-  engine->block_manager_pool()->publish_prefix(cached_sequence);
-  engine->block_manager_pool()->deallocate(cached_sequence);
+  engine->kv_cache_manager()->publish_prefix(cached_sequence);
+  engine->kv_cache_manager()->deallocate(cached_sequence);
 
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
@@ -1104,7 +1113,7 @@ TEST(SchedulerPolicyTest, LinearPrefillPlanningAlignsAfterPartialBudget) {
       .running_requests = running_requests,
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
-      .kv_cache_manager = engine.block_manager_pool(),
+      .kv_cache_manager = engine.kv_cache_manager(),
       .profile_manager = nullptr,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -1126,7 +1135,7 @@ TEST(SchedulerPolicyTest, LinearPrefillPlanningAlignsAfterPartialBudget) {
     sequence->kv_state().set_kv_cache_tokens_num(
         sequence->kv_cache_tokens_num() + actual_tokens);
   }
-  engine.block_manager_pool()->deallocate(sequence);
+  engine.kv_cache_manager()->deallocate(sequence);
 }
 
 TEST(SchedulerPolicyTest, LinearSchedulingPreservesReadSourceAcrossPolicies) {
@@ -1255,7 +1264,7 @@ TEST(SchedulerPolicyTest, DecodeQueuePlansColdBestOfCandidatesAsPrefill) {
           auto request = std::make_shared<Request>(
               "best-of", "best-of", "", std::move(request_state), "");
           Sequence* first = request->sequences().front().get();
-          ASSERT_TRUE(engine.block_manager_pool()->allocate(first, 7));
+          ASSERT_TRUE(engine.kv_cache_manager()->allocate(first, 7));
           std::vector<Batch> prefill(1);
           prefill.front().add(first, 7);
           first->kv_state().set_kv_cache_tokens_num(7);
@@ -1282,7 +1291,7 @@ TEST(SchedulerPolicyTest, DecodeQueuePlansColdBestOfCandidatesAsPrefill) {
                     expected_prefill_tokens);
           EXPECT_EQ(batches.front().get_allowed_max_tokens().front(),
                     static_cast<size_t>(1 + speculative_tokens));
-          engine.block_manager_pool()->deallocate(request.get());
+          engine.kv_cache_manager()->deallocate(request.get());
         }
       }
     }
@@ -1545,7 +1554,7 @@ TEST(SchedulerPolicyTest, UnifiedReclaimsMutuallyBlockedChunksWhenIdle) {
     };
     UnifiedPolicy policy(mode, options);
     FakeEngine engine(/*num_blocks=*/9, /*block_size=*/16);
-    BlockManagerPool* pool = engine.block_manager_pool();
+    BlockManagerPool* pool = engine.kv_cache_manager();
     ProfileManager::Options profile_options;
     profile_options.max_tokens_per_batch(32).max_seqs_per_batch(2);
     ProfileManager profile_manager(&engine, profile_options);
@@ -2514,14 +2523,13 @@ TEST(SchedulerPolicyTest, NormalSchedule) {
   for (auto req : requests) {
     scheduler->add_request(req);
   }
-  auto total_blocks =
-      util::max(engine->block_manager_pool()->num_free_blocks());
+  auto total_blocks = util::max(engine->kv_cache_manager()->num_free_blocks());
   auto batch = scheduler->prepare_batch_test();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 3);
   auto seq_use_blocks =
       (100 / block_size + 1) + (200 / block_size + 1) + (300 / block_size + 1);
-  EXPECT_TRUE(util::max(engine->block_manager_pool()->num_free_blocks()) ==
+  EXPECT_TRUE(util::max(engine->kv_cache_manager()->num_free_blocks()) ==
               (total_blocks - seq_use_blocks));
   update_requests(requests);
 
@@ -2616,7 +2624,7 @@ TEST(SchedulerPolicyTest, PreemptSchedule) {
   EXPECT_TRUE(batch[0].size() == 2);
   update_requests(running_requests);
 
-  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+  BlockManagerPool* block_manager_pool = engine->kv_cache_manager();
   int free_blocks_before_preempt =
       util::max(block_manager_pool->num_free_blocks());
   batch = scheduler->prepare_batch_test();
@@ -2882,9 +2890,8 @@ TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
     ASSERT_EQ(batches.size(), 1u);
     EXPECT_EQ(batches.front().size(), 1u);
     EXPECT_EQ(scheduler.get_waiting_requests_num(), 1u);
-    EXPECT_EQ(engine.block_manager_pool()->admission_capacity(0),
-              num_slots - 1);
-    EXPECT_EQ(engine.block_manager_pool()->sequence_resource_units(8),
+    EXPECT_EQ(engine.kv_cache_manager()->admission_capacity(0), num_slots - 1);
+    EXPECT_EQ(engine.kv_cache_manager()->sequence_resource_units(8),
               prompt_slots);
   }
 }
@@ -3441,7 +3448,7 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsDecodeBeyondArena) {
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
     FakeEngine engine(/*num_blocks=*/3, /*block_size=*/4);
-    BlockManagerPool* pool = engine.block_manager_pool();
+    BlockManagerPool* pool = engine.kv_cache_manager();
     TestableContinuousScheduler scheduler(&engine, options);
     const std::vector<size_t> initial_free_blocks = pool->num_free_blocks();
     auto request =
@@ -3490,7 +3497,7 @@ TEST(SchedulerPolicyTest, IdleChunkContinuationExceedsUtilizationThreshold) {
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
     FakeEngine engine(/*num_blocks=*/8, /*block_size=*/4);
-    BlockManagerPool* pool = engine.block_manager_pool();
+    BlockManagerPool* pool = engine.kv_cache_manager();
     TestableContinuousScheduler scheduler(&engine, options);
     const std::vector<size_t> initial_free_blocks = pool->num_free_blocks();
     auto request =
@@ -3926,7 +3933,7 @@ TEST(SchedulerPolicyTest,
                         /*enable_prefix_cache=*/false,
                         /*dp_size=*/1,
                         enable_linear_attention);
-      BlockManagerPool* pool = engine.block_manager_pool();
+      BlockManagerPool* pool = engine.kv_cache_manager();
       const std::vector<size_t> initial_free_blocks = pool->num_free_blocks();
       std::vector<std::shared_ptr<Request>> requests = generate_request(
           {7, 7},

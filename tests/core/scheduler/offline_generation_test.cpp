@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
 #include "core/scheduler/continuous_scheduler.h"
 
 namespace xllm {
@@ -47,10 +48,6 @@ class FiniteGenerationEngine final : public Engine {
         .enable_prefix_cache(false);
     kv_cache_manager_ = std::make_unique<BlockManagerPool>(options);
     tokenizer_ = std::make_unique<TestTokenizer>();
-  }
-
-  BlockManagerPool* block_manager_pool() const override {
-    return static_cast<BlockManagerPool*>(kv_cache_manager_.get());
   }
 
   ForwardOutput step(BatchGroup& batches) {
@@ -181,8 +178,7 @@ TEST_F(OfflineGenerationTest, OverlapCommitsFinalTokensAndCanRunAgain) {
   SchedulerOptions options = generation_options(/*overlap=*/true);
   FiniteGenerationEngine engine(/*overlap=*/true);
   OfflineGenerationScheduler scheduler(&engine, options);
-  const auto initial_free_blocks =
-      engine.block_manager_pool()->num_free_blocks();
+  const auto initial_free_blocks = engine.kv_cache_manager()->num_free_blocks();
 
   scheduler.generate_with_schedule_overlap();
   EXPECT_EQ(engine.submitted(), 0u);
@@ -206,7 +202,7 @@ TEST_F(OfflineGenerationTest, OverlapCommitsFinalTokensAndCanRunAgain) {
     EXPECT_EQ(outputs.front().outputs.front().token_ids,
               std::vector<int32_t>(max_tokens, 7));
     EXPECT_EQ(engine.submitted(), engine.completed());
-    EXPECT_EQ(engine.block_manager_pool()->num_free_blocks(),
+    EXPECT_EQ(engine.kv_cache_manager()->num_free_blocks(),
               initial_free_blocks);
   }
 }

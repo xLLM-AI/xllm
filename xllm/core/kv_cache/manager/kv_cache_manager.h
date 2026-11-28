@@ -16,12 +16,12 @@ limitations under the License.
 #pragma once
 
 #include <functional>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "common/macros.h"
 #include "framework/batch/batch_group.h"
-#include "framework/model/model_params_view.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
 
@@ -32,6 +32,14 @@ struct HostCacheRestorePoint {
   size_t copy_units = 0;
 };
 
+// Flat KV reserves block 0 for padding. This legacy PD bound is independent
+// of transient pressure and excludes that block from usable capacity.
+bool exceeds_decode_capacity(size_t num_prompt_tokens,
+                             size_t block_size,
+                             size_t num_blocks);
+
+// Request-cache coordination. Implementations own DP selection and translate
+// framework sequence operations into partition allocation and cache transfers.
 class KVCacheManager {
  public:
   using KVCacheReservation = std::pair<Sequence*, size_t>;
@@ -61,6 +69,19 @@ class KVCacheManager {
     return false;
   }
   virtual bool try_allocate(Sequence* sequence) = 0;
+
+  // Profiling grows device resources without scheduling Host restoration.
+  virtual bool allocate_for_profiling(Sequence* sequence, size_t num_tokens) {
+    return allocate(sequence, num_tokens);
+  }
+  // Discard resources without publishing their contents as reusable prefixes.
+  virtual void deallocate_without_cache(Sequence* sequence) = 0;
+  // A permanent PD rejection requires a proven bound for the active layout.
+  virtual bool exceeds_decode_capacity(Sequence* sequence) const {
+    return false;
+  }
+  virtual bool uses_virtual_memory() const { return false; }
+  virtual const std::string& model_id() const = 0;
 
   virtual void transfer_blocks(BatchGroup& batches) {};
   virtual void transfer_blocks() {};
@@ -150,6 +171,10 @@ class KVCacheManager {
   virtual std::vector<size_t> num_free_blocks() const = 0;
   virtual std::vector<size_t> num_used_blocks() const = 0;
   virtual double kv_cache_utilization() const = 0;
+  // Metrics average ranks; admission uses the least-utilized eligible rank.
+  virtual float average_cache_utilization() const {
+    return static_cast<float>(kv_cache_utilization());
+  }
 
   // Predict which DP rank a fresh sequence would be assigned to during
   // allocation. Uses the same effective-headroom metric and round-robin

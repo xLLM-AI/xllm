@@ -22,13 +22,13 @@ limitations under the License.
 
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/batch/forward_input_factory.h"
-#include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kv_cache/block/block_manager_impl.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
 #include "worker.pb.h"
 
 namespace xllm {

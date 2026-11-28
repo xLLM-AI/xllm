@@ -69,6 +69,7 @@ cc_library(
     :parallel_config_validation
     :runtime
     :kv_cache_manager_factory
+    :kv_cache_manager_interface
     :xllm_server
     :util
     glog::glog

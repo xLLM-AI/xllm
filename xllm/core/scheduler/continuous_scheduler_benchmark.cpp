@@ -57,7 +57,6 @@ limitations under the License.
 
 #include "core/common/types.h"
 #include "core/distributed_runtime/engine.h"
-#include "core/framework/block/block_manager_pool.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/request_output.h"
@@ -65,6 +64,7 @@ limitations under the License.
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/tokenizer/tokenizer.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
 #include "core/scheduler/continuous_scheduler.h"
 
 namespace xllm {
@@ -111,7 +111,7 @@ class FakeEngine final : public Engine {
     return std::vector<RawForwardOutput>(batch.size());
   }
   const Tokenizer* tokenizer() const override { return &fake_tokenizer_; }
-  BlockManagerPool* block_manager_pool() const override {
+  KVCacheManager* kv_cache_manager() const override {
     return block_manager_pool_.get();
   }
   const ModelArgs& model_args() const override { return model_args_; }

@@ -25,7 +25,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
-#include "framework/block/block_manager_pool.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
 

@@ -45,14 +45,14 @@ limitations under the License.
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
+#include "core/kv_cache/manager/composite_block_manager.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/transport/shared_memory_transport.h"
 #include "core/util/scope_guard.h"
 #include "core/util/slice.h"
 #include "core/util/tensor_helper.h"
-#include "framework/block/block_manager_pool.h"
-#include "framework/block/composite_block_manager.h"
 #include "framework/block/grouped_cache_test_utils.h"
 #include "framework/config/service_config.h"
 #include "framework/model/model_args.h"
@@ -637,7 +637,12 @@ TEST(BatchTest, ProcessRawOutputAccumulatesRequestSpeculativeStats) {
                  MMData(),
                  decoder,
                  seq_params);
-  Sequence second(first, /*index=*/1);
+  Sequence second(/*index=*/1,
+                  /*prompt_token_ids=*/{10},
+                  torch::Tensor(),
+                  MMData(),
+                  decoder,
+                  seq_params);
   first.add_blocks(BlockType::KV, manager.allocate(1));
   second.add_blocks(BlockType::KV, manager.allocate(1));
 
@@ -3106,7 +3111,8 @@ TEST(BatchTest, CancelledOverlapOutputDoesNotUpdateReleasedSequence) {
       IncrementalDecoder decoder("", 4, false, false);
       Sequence cancelled(
           0, {1, 2, 3, 4}, torch::Tensor(), MMData(), decoder, params);
-      Sequence running(cancelled, 1);
+      Sequence running(
+          1, {1, 2, 3, 4}, torch::Tensor(), MMData(), decoder, params);
       ASSERT_TRUE(pool.allocate(&cancelled, 4));
       ASSERT_TRUE(pool.allocate(&running, 4));
       std::vector<Batch> batches(1);

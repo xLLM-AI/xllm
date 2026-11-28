@@ -28,7 +28,7 @@ limitations under the License.
 
 namespace xllm {
 
-class BlockManagerPool;
+class KVCacheManager;
 class Engine;
 class Request;
 class Sequence;
@@ -92,8 +92,9 @@ class PDServiceImpl {
                                  const std::vector<int32_t>& block_ids,
                                  proto::DisaggResponse* response);
 
-  // Not owned. The initialized engine and its pool outlive this service.
-  const BlockManagerPool* const block_manager_;
+  // Not owned. The initialized engine and its cache manager outlive this
+  // service.
+  const KVCacheManager* const kv_cache_manager_;
 };
 
 }  // namespace xllm

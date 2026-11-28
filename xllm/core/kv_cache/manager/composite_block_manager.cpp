@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/block/composite_block_manager.h"
+#include "core/kv_cache/manager/composite_block_manager.h"
 
 #include <glog/logging.h>
 

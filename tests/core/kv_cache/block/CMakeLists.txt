@@ -33,6 +33,7 @@ cc_test(
     concurrent_block_manager_test.cpp
   DEPS
     :block
+    :kv_cache_manager
     :config
     :prefix_cache
     GTest::gtest_main

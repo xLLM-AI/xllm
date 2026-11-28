@@ -27,18 +27,3 @@ add_subdirectory(request)
 add_subdirectory(eplb)
 add_subdirectory(dit_cache)
 add_subdirectory(speculative)
-
-# Manager construction uses the shared VMM allocator backend.
-cc_library(
-  NAME
-    kv_cache_manager_factory
-  HDRS
-    block/kv_cache_manager_factory.h
-  SRCS
-    block/kv_cache_manager_factory.cpp
-  DEPS
-    :block
-    :kv_cache
-    :static_kv_tensor_allocator
-    :distributed_vmm_coordinator
-)

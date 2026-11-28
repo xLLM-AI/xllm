@@ -21,7 +21,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/framework/config/scheduler_config.h"
-#include "framework/block/block_manager_pool.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
 #include "framework/request/incremental_decoder.h"
 #include "request.h"
 #include "request_state.h"

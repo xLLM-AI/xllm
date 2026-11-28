@@ -71,7 +71,6 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/distributed_runtime/worker_model_codec.h"
 #include "core/framework/batch/batch.h"
-#include "core/framework/block/block_manager_pool.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/request/incremental_decoder.h"
@@ -79,6 +78,7 @@ limitations under the License.
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kv_cache/block/block.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
 #if defined(USE_NPU)
 #include "core/platform/npu/startup.h"
 #endif

@@ -46,13 +46,13 @@ limitations under the License.
 #include "core/framework/batch/sampling_input_builder.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/platform/device.h"
 #include "core/util/scope_guard.h"
 #include "distributed_runtime/distributed_worker_manager.h"
 #include "distributed_runtime/engine.h"
 #include "distributed_runtime/kv_transfer_coordinator.h"
-#include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
@@ -225,7 +225,7 @@ class FakeEngine final : public Engine {
 
   const Tokenizer* tokenizer() const override { return tokenizer_.get(); }
 
-  BlockManagerPool* block_manager_pool() const override {
+  BlockManagerPool* kv_cache_manager() const override {
     return block_manager_.get();
   }
 
@@ -802,7 +802,7 @@ TEST(PDSchedulerTest, QueuedReleaseRetainsRequestUntilOwnerAcknowledges) {
   TestPDScheduler scheduler(&engine, make_decode_options());
   auto request = make_request({1, 2, 3, 4});
   ASSERT_TRUE(
-      engine.block_manager_pool()->allocate(request->sequences()[0].get()));
+      engine.kv_cache_manager()->allocate(request->sequences()[0].get()));
   finish_prefill(request->sequences()[0].get());
   const std::weak_ptr<Request> lifetime = request;
   const std::thread::id owner_thread = std::this_thread::get_id();
@@ -816,7 +816,7 @@ TEST(PDSchedulerTest, QueuedReleaseRetainsRequestUntilOwnerAcknowledges) {
       std::move(request), /*cache_prefix=*/true);
   EXPECT_FALSE(lifetime.expired());
   EXPECT_EQ(releases, 0);
-  EXPECT_EQ(engine.block_manager_pool()->num_used_blocks()[0], 2u);
+  EXPECT_EQ(engine.kv_cache_manager()->num_used_blocks()[0], 2u);
   EXPECT_EQ(completion.wait_for(std::chrono::seconds(0)),
             std::future_status::timeout);
 
@@ -827,8 +827,8 @@ TEST(PDSchedulerTest, QueuedReleaseRetainsRequestUntilOwnerAcknowledges) {
   completion.get();
   EXPECT_EQ(releases, 1);
   EXPECT_TRUE(lifetime.expired());
-  EXPECT_EQ(engine.block_manager_pool()->num_used_blocks()[0], 0u);
-  EXPECT_EQ(first_cache_size(*engine.block_manager_pool()), 2u);
+  EXPECT_EQ(engine.kv_cache_manager()->num_used_blocks()[0], 0u);
+  EXPECT_EQ(first_cache_size(*engine.kv_cache_manager()), 2u);
 }
 
 TEST(PDSchedulerTest, QueuedUncachedReleaseDoesNotPublishCompletedPrefix) {
@@ -836,7 +836,7 @@ TEST(PDSchedulerTest, QueuedUncachedReleaseDoesNotPublishCompletedPrefix) {
   TestPDScheduler scheduler(&engine, make_decode_options());
   auto request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
-  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
   finish_prefill(sequence);
 
   auto completion =
@@ -850,15 +850,15 @@ TEST(PDSchedulerTest, QueuedUncachedReleaseDoesNotPublishCompletedPrefix) {
             std::future_status::ready);
   completion.get();
   EXPECT_FALSE(sequence->has_any_blocks());
-  EXPECT_EQ(engine.block_manager_pool()->num_used_blocks()[0], 0u);
-  EXPECT_EQ(first_cache_size(*engine.block_manager_pool()), 0u);
+  EXPECT_EQ(engine.kv_cache_manager()->num_used_blocks()[0], 0u);
+  EXPECT_EQ(first_cache_size(*engine.kv_cache_manager()), 0u);
 }
 
 TEST(PDSchedulerShutdownTest, DrainsQueuedReleaseBeforeDestroyingOwner) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   auto request = make_request({1, 2, 3, 4});
   ASSERT_TRUE(
-      engine.block_manager_pool()->allocate(request->sequences()[0].get()));
+      engine.kv_cache_manager()->allocate(request->sequences()[0].get()));
   const std::weak_ptr<Request> lifetime = request;
   std::future<void> completion;
   {
@@ -873,33 +873,33 @@ TEST(PDSchedulerShutdownTest, DrainsQueuedReleaseBeforeDestroyingOwner) {
             std::future_status::ready);
   completion.get();
   EXPECT_TRUE(lifetime.expired());
-  EXPECT_EQ(engine.block_manager_pool()->num_used_blocks()[0], 0u);
+  EXPECT_EQ(engine.kv_cache_manager()->num_used_blocks()[0], 0u);
 }
 
 TEST(PDSchedulerShutdownTest,
      DrainsPrefillProducerWaitingForReleaseAcknowledgement) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-  ASSERT_EXIT(([] {
-                alarm(5);
-                FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-                auto request = make_request({1, 2, 3, 4});
-                CHECK(engine.block_manager_pool()->allocate(
-                    request->sequences()[0].get()));
-                const std::weak_ptr<Request> lifetime = request;
-                std::future<void> released;
-                {
-                  TestPDScheduler scheduler(&engine, make_options());
-                  released =
-                      scheduler.release_from_prefill_worker(std::move(request));
-                }
-                CHECK(released.wait_for(std::chrono::seconds(0)) ==
-                      std::future_status::ready);
-                CHECK(lifetime.expired());
-                CHECK_EQ(engine.block_manager_pool()->num_used_blocks()[0], 0u);
-                _exit(0);
-              }()),
-              ::testing::ExitedWithCode(0),
-              "");
+  ASSERT_EXIT(
+      ([] {
+        alarm(5);
+        FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+        auto request = make_request({1, 2, 3, 4});
+        CHECK(
+            engine.kv_cache_manager()->allocate(request->sequences()[0].get()));
+        const std::weak_ptr<Request> lifetime = request;
+        std::future<void> released;
+        {
+          TestPDScheduler scheduler(&engine, make_options());
+          released = scheduler.release_from_prefill_worker(std::move(request));
+        }
+        CHECK(released.wait_for(std::chrono::seconds(0)) ==
+              std::future_status::ready);
+        CHECK(lifetime.expired());
+        CHECK_EQ(engine.kv_cache_manager()->num_used_blocks()[0], 0u);
+        _exit(0);
+      }()),
+      ::testing::ExitedWithCode(0),
+      "");
 }
 
 TEST(PDSchedulerTest, AdmissionRetainsCapacityUntilDispatchCompletes) {
@@ -970,7 +970,7 @@ TEST(PDSchedulerTest, AdmissionRetainsCapacityUntilDispatchCompletes) {
 TEST(PDSchedulerTest, CachesPrefillBlocksBeforeRelease) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   TestPDScheduler scheduler(&engine, make_options());
-  BlockManagerPool* block_manager = engine.block_manager_pool();
+  BlockManagerPool* block_manager = engine.kv_cache_manager();
 
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
@@ -996,7 +996,7 @@ TEST(PDSchedulerTest, CachesPrefillBlocksBeforeRelease) {
 TEST(PDSchedulerTest, CacheSkipsExistingSharedBlocks) {
   FakeEngine engine(/*num_blocks=*/10, /*block_size=*/2);
   TestPDScheduler scheduler(&engine, make_options());
-  BlockManagerPool* block_manager = engine.block_manager_pool();
+  BlockManagerPool* block_manager = engine.kv_cache_manager();
 
   std::shared_ptr<Request> seed_request = make_request({1, 2, 3, 4});
   Sequence* seed_sequence = seed_request->sequences()[0].get();
@@ -1029,7 +1029,7 @@ TEST(PDSchedulerTest, MtpFirstGenerationRequiresBootstrapBeforeQueue) {
   TestPDScheduler scheduler(&engine, make_mtp_decode_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   ASSERT_TRUE(
-      engine.block_manager_pool()->allocate(request->sequences()[0].get()));
+      engine.kv_cache_manager()->allocate(request->sequences()[0].get()));
   ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
 
   EXPECT_FALSE(recv_first_generation(&scheduler, torch::Tensor()));
@@ -1052,7 +1052,7 @@ TEST(PDSchedulerTest, InvalidFirstGenerationSequenceReleasesReservation) {
 
     EXPECT_FALSE(recv_first_generation(&scheduler, torch::Tensor()));
     EXPECT_TRUE(scheduler.reservations_empty());
-    EXPECT_EQ(engine.block_manager_pool()->num_used_blocks()[0], 0u);
+    EXPECT_EQ(engine.kv_cache_manager()->num_used_blocks()[0], 0u);
     std::shared_ptr<Request> queued;
     EXPECT_FALSE(scheduler.pop_decode_request_for_test(&queued));
   }
@@ -1065,7 +1065,7 @@ TEST(PDSchedulerTest, MtpFirstGenerationStoresBootstrapThenQueues) {
   TestPDScheduler scheduler(&engine, make_mtp_decode_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
-  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
   sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
   ASSERT_GE(sequence->get_embedding_block_id(), 0);
   ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
@@ -1090,7 +1090,7 @@ TEST(PDSchedulerTest, GroupedPullAlignsActiveSwaSuffix) {
       PDSchedulerTestPeer::make_transfer_coordinator({worker}));
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
-  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
   sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
 
   BlockManager::Options swa_options;
@@ -1138,7 +1138,7 @@ TEST(PDSchedulerTest, GroupedPullAlignsActiveSwaSuffix) {
 
   std::shared_ptr<Request> queued;
   ASSERT_TRUE(scheduler.pop_decode_request_for_test(&queued));
-  engine.block_manager_pool()->deallocate(queued.get());
+  engine.kv_cache_manager()->deallocate(queued.get());
   queued->sequences()[0]->kv_state().erase_blocks(BlockType::SWA);
 }
 
@@ -1151,7 +1151,7 @@ TEST(PDSchedulerTest, FailedPullReleasesBlocksWithoutEnqueueingDecode) {
                             make_decode_options(),
                             PDSchedulerTestPeer::make_transfer_coordinator(
                                 {failed_worker, healthy_worker}));
-  BlockManagerPool* pool = engine.block_manager_pool();
+  BlockManagerPool* pool = engine.kv_cache_manager();
   const auto free_before = pool->num_free_blocks();
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
@@ -1194,7 +1194,7 @@ TEST(PDSchedulerTest, FirstDecodeTokenLatencyIsNonNegative) {
   TestPDScheduler scheduler(&engine, make_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
-  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
   sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
   ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
 
@@ -1213,7 +1213,7 @@ TEST(PDSchedulerTest, DecodeLatencyIncludesPrefillTtft) {
   TestPDScheduler scheduler(&engine, make_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
-  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
   sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
   ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
 
@@ -1234,7 +1234,7 @@ TEST(PDSchedulerTest, DecodeLatencyUsesCumulativeUpstreamElapsed) {
   TestPDScheduler scheduler(&engine, make_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
-  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
   sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
   ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
 
@@ -1274,7 +1274,7 @@ TEST(PDSchedulerTest, PreservesPrefillCachedTokensOnDecodeRequest) {
   TestPDScheduler scheduler(&engine, make_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
-  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
   sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
   ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
 
@@ -1668,7 +1668,7 @@ TEST(PDSchedulerTest, PromptBeyondDecodeBlockCapacityIsPermanent) {
 TEST(PDSchedulerTest, TemporaryDecodeBlockPressureIsNotPermanent) {
   FakeEngine engine(/*num_blocks=*/4, /*block_size=*/2);
   TestPDScheduler scheduler(&engine, make_options());
-  BlockManagerPool* block_manager = engine.block_manager_pool();
+  BlockManagerPool* block_manager = engine.kv_cache_manager();
   std::shared_ptr<Request> holder = make_request({1, 2, 3, 4, 5, 6});
   ASSERT_TRUE(block_manager->try_allocate(holder->sequences()[0].get()));
   std::shared_ptr<Request> request = make_request({7, 8});
@@ -1683,7 +1683,7 @@ TEST(PDSchedulerTest, TemporaryDecodeBlockPressureIsNotPermanent) {
 TEST(PDSchedulerTest, OversizedDecodePromptIsPermanent) {
   FakeEngine engine(/*num_blocks=*/4, /*block_size=*/2);
   TestPDScheduler scheduler(&engine, make_options());
-  BlockManagerPool* block_manager = engine.block_manager_pool();
+  BlockManagerPool* block_manager = engine.kv_cache_manager();
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4, 5, 6, 7});
   Sequence* sequence = request->sequences()[0].get();
 
@@ -1699,7 +1699,7 @@ TEST(PDSchedulerTest, InvalidPrefillCachedTokensFallBackToZero) {
     TestPDScheduler scheduler(&engine, make_options());
     std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
     Sequence* sequence = request->sequences()[0].get();
-    ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+    ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
     sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
     ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
 
@@ -1819,7 +1819,7 @@ TEST(PDSchedulerTest, LocalFailureReturnsDecodeReservation) {
                            /*num_speculative_tokens=*/1);
   TestPDScheduler decode(&decode_engine, make_mtp_decode_options());
   auto remote = make_request({1, 2, 3, 4, 5, 6, 7, 8});
-  auto* pool = decode_engine.block_manager_pool();
+  auto* pool = decode_engine.kv_cache_manager();
   const auto free_before = pool->num_free_blocks();
   ASSERT_TRUE(decode.try_allocate(remote->sequences()[0].get()));
   remote->state().pd_reservation_id = "reservation";
@@ -1937,7 +1937,7 @@ TEST(PDSchedulerTest, PendingReleaseDoesNotDelayFirstGeneration) {
     decode.pop_decode_request_for_test(&queued);
     EXPECT_EQ(queued, remote_healthy);
     EXPECT_EQ(remote_healthy->sequences()[0]->num_generated_tokens(), 1u);
-    EXPECT_EQ(prefill_engine.block_manager_pool()->num_used_blocks()[0], 0u);
+    EXPECT_EQ(prefill_engine.kv_cache_manager()->num_used_blocks()[0], 0u);
     EXPECT_FALSE(decode.reservations_empty());
   }
 
@@ -1951,7 +1951,7 @@ TEST(PDSchedulerTest, PendingReleaseDoesNotDelayFirstGeneration) {
   if (queued == nullptr) {
     decode.pop_decode_request_for_test(&queued);
   }
-  decode_engine.block_manager_pool()->deallocate_without_cache(
+  decode_engine.kv_cache_manager()->deallocate_without_cache(
       remote_healthy->sequences()[0].get());
   server.Stop(0);
   server.Join();
@@ -1994,7 +1994,7 @@ TEST(PDSchedulerTest, FailedFirstGenerationDoesNotRecordServerTtft) {
   EXPECT_FALSE(request->server_ttft_seconds().has_value());
   EXPECT_EQ(HISTOGRAM_server_time_to_first_token_latency_milliseconds.count(),
             server_ttft_count);
-  EXPECT_EQ(prefill_engine.block_manager_pool()->num_used_blocks()[0], 0u);
+  EXPECT_EQ(prefill_engine.kv_cache_manager()->num_used_blocks()[0], 0u);
   server.Stop(0);
   server.Join();
 }
@@ -2058,7 +2058,7 @@ class ReservationTest : public ::testing::Test {
     EXPECT_EQ(status.get().code(), StatusCode::RESOURCE_EXHAUSTED);
     EXPECT_FALSE(prefill.has_channel(request->request_id()));
     EXPECT_TRUE(request->state().decode_rpc_address.empty());
-    EXPECT_EQ(engine.block_manager_pool()->num_used_blocks()[0], 0u);
+    EXPECT_EQ(engine.kv_cache_manager()->num_used_blocks()[0], 0u);
   }
 };
 }  // namespace
@@ -2075,7 +2075,7 @@ TEST_F(ReservationTest, LostConfirmationRetriesWithoutDoubleFree) {
   EXPECT_EQ(service_.calls, 2);
   EXPECT_EQ(service_.released, 1);
   EXPECT_TRUE(decode_.reservations_empty());
-  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks(),
+  EXPECT_EQ(engine_.kv_cache_manager()->num_used_blocks(),
             (std::vector<size_t>{0, 0}));
   EXPECT_EQ(embedding->num_used_blocks(), 0u);
   EXPECT_EQ(embedding->num_free_blocks(), 15u);
@@ -2155,7 +2155,7 @@ TEST_F(ReservationTest, ReleaseNeverConsumesAnotherReservation) {
   EXPECT_TRUE(decode_.release_reservation("other", "reservation"));
   EXPECT_TRUE(decode_.release_reservation("req", "replacement"));
   EXPECT_TRUE(decode_.reservations_empty());
-  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks(),
+  EXPECT_EQ(engine_.kv_cache_manager()->num_used_blocks(),
             (std::vector<size_t>{0, 0}));
 }
 
@@ -2167,7 +2167,7 @@ TEST_F(ReservationTest, ReleasePreventsLateHandoff) {
   EXPECT_FALSE(decode_.decode_schedule(late, "prefill"));
   EXPECT_EQ(late->sequences()[0]->get_embedding_block_id(), -1);
   EXPECT_TRUE(decode_.reservations_empty());
-  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks(),
+  EXPECT_EQ(engine_.kv_cache_manager()->num_used_blocks(),
             (std::vector<size_t>{0, 0}));
   auto request = reserve();
   EXPECT_TRUE(decode_.release_reservation("req", "reservation"));
@@ -2182,7 +2182,7 @@ TEST_F(ReservationTest, ReleasePreventsLateHandoff) {
   ASSERT_TRUE(decode_.pop_decode_request_for_test(&queued));
   EXPECT_EQ(queued, replacement);
   EXPECT_TRUE(decode_.reservations_empty());
-  engine_.block_manager_pool()->deallocate_without_cache(
+  engine_.kv_cache_manager()->deallocate_without_cache(
       queued->sequences()[0].get());
 }
 
@@ -2196,7 +2196,7 @@ TEST_F(ReservationTest, HandoffPreventsReleaseOfRunningResources) {
   ASSERT_TRUE(decode_.pop_decode_request_for_test(&queued));
   EXPECT_EQ(queued, request);
   EXPECT_TRUE(decode_.reservations_empty());
-  engine_.block_manager_pool()->deallocate_without_cache(
+  engine_.kv_cache_manager()->deallocate_without_cache(
       queued->sequences()[0].get());
 }
 
@@ -2217,15 +2217,15 @@ TEST_F(ReservationTest, ConcurrentHandoffAndReleaseHaveOneOwner) {
   std::shared_ptr<Request> queued;
   EXPECT_EQ(decode_.pop_decode_request_for_test(&queued), handed_off);
   if (handed_off) {
-    engine_.block_manager_pool()->deallocate_without_cache(
+    engine_.kv_cache_manager()->deallocate_without_cache(
         queued->sequences()[0].get());
   }
-  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks(),
+  EXPECT_EQ(engine_.kv_cache_manager()->num_used_blocks(),
             (std::vector<size_t>{0, 0}));
 }
 
 TEST_F(ReservationTest, ReleasePreservesValidPrefixOnly) {
-  auto* pool = engine_.block_manager_pool();
+  auto* pool = engine_.kv_cache_manager();
   auto seed = make_request({1, 2, 3, 4}, "seed");
   auto* seq = seed->sequences()[0].get();
   ASSERT_TRUE(pool->allocate(seq));
@@ -2253,7 +2253,7 @@ TEST_F(ReservationTest, ReleasePreservesValidPrefixOnly) {
 }
 
 TEST_F(ReservationTest, RejectedAllocationRollsBackWithoutReservation) {
-  auto* pool = engine_.block_manager_pool();
+  auto* pool = engine_.kv_cache_manager();
   const auto free_before = pool->num_free_blocks();
   auto rejected = make_request(std::vector<int32_t>(40, 1));
   EXPECT_FALSE(decode_.try_allocate(rejected->sequences()[0].get()));
@@ -2312,7 +2312,7 @@ TEST_P(ChunkReservationTest,
   step.get();
   auto blocker = make_request(std::vector<int32_t>(12, 99), "blocker");
   ASSERT_TRUE(
-      engine.block_manager_pool()->allocate(blocker->sequences()[0].get()));
+      engine.kv_cache_manager()->allocate(blocker->sequences()[0].get()));
   // Physical pressure is retried before a persistent failure releases the
   // reservation. Exhaust that window without collecting forward outputs.
   constexpr size_t kRetryLimit = 4096;
@@ -2339,9 +2339,9 @@ TEST_P(ChunkReservationTest,
   prefill.wait_notifications(&decode_);
   EXPECT_EQ(service_.released, 1);
   EXPECT_TRUE(decode_.reservations_empty());
-  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks(),
+  EXPECT_EQ(engine_.kv_cache_manager()->num_used_blocks(),
             (std::vector<size_t>{0, 0}));
-  engine.block_manager_pool()->deallocate_without_cache(
+  engine.kv_cache_manager()->deallocate_without_cache(
       blocker->sequences()[0].get());
 }
 INSTANTIATE_TEST_SUITE_P(OverlapModes, ChunkReservationTest, ::testing::Bool());
@@ -2377,7 +2377,7 @@ TEST_F(ReservationTest, DuplicateAdmissionRollsBackUncomputedResources) {
   EXPECT_FALSE(decode_.decode_schedule(duplicate, "prefill"));
   EXPECT_EQ(duplicate->sequences()[0]->get_embedding_block_id(), -1);
   EXPECT_EQ(embedding->num_used_blocks(), embedding_used - 1);
-  EXPECT_EQ(engine_.block_manager_pool()->num_blocks_in_prefix_cache(),
+  EXPECT_EQ(engine_.kv_cache_manager()->num_blocks_in_prefix_cache(),
             (std::vector<size_t>{0, 0}));
   EXPECT_GE(original->sequences()[0]->get_embedding_block_id(), 0);
   EXPECT_TRUE(decode_.release_reservation("req", "reservation"));
@@ -2393,7 +2393,7 @@ TEST(PDSchedulerTest, MtpExhaustionRollsBackKvReservation) {
   original->state().pd_reservation_id = "reservation";
   ASSERT_TRUE(decode.try_allocate(original->sequences()[0].get()));
   ASSERT_TRUE(decode.decode_schedule(original, "prefill"));
-  auto* pool = engine.block_manager_pool();
+  auto* pool = engine.kv_cache_manager();
   const auto free_before = pool->num_free_blocks();
   auto rejected = make_request({11, 12, 13, 14}, "rejected");
   EXPECT_FALSE(decode.try_allocate(rejected->sequences()[0].get()));
@@ -2585,7 +2585,7 @@ TEST(PDSchedulerTest, DecodeEmitsFirstTokenAsynchronouslyBeforeAnyDecodeStep) {
       scheduler.wait_for_responses();
     });
     Sequence* sequence = request->sequences()[0].get();
-    ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+    ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
     sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
     ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
     received = std::async(std::launch::async, [&scheduler] {
@@ -2664,7 +2664,7 @@ TEST(PDSchedulerTest, DecodeTerminatesFirstTokenWithoutQueueingDecodeWork) {
       return true;
     };
     Sequence* sequence = request->sequences()[0].get();
-    ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+    ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
     sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
     ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
     ASSERT_TRUE(recv_first_generation(&scheduler, torch::Tensor()));
@@ -2703,7 +2703,7 @@ TEST(PDSchedulerTest, FullDecodeQueueFailsAfterFirstTokenAndReleasesKv) {
     return true;
   };
   Sequence* sequence = request->sequences()[0].get();
-  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  ASSERT_TRUE(engine.kv_cache_manager()->allocate(sequence));
   sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
   ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
   EXPECT_FALSE(recv_first_generation(&scheduler, torch::Tensor()));

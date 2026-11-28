@@ -27,8 +27,6 @@ limitations under the License.
 
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/batch/shared_kv_mapping_tracker.h"
-#include "core/framework/block/block_manager_pool.h"
-#include "core/framework/block/composite_block_manager.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
@@ -39,6 +37,8 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/static_kv_block_pool.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
+#include "core/kv_cache/manager/composite_block_manager.h"
 #include "core/util/tensor_helper.h"
 #include "worker.pb.h"
 
