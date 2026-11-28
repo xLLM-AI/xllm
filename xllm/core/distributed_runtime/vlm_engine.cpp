@@ -145,7 +145,9 @@ VLMEngine::VLMEngine(
           .enable_graph = options_.enable_graph(),
           .enable_dp_global_json_object_active =
               dp_size_ > 1 && !options_.is_draft_engine() &&
-              options_.num_speculative_tokens() > 0});
+              options_.num_speculative_tokens() > 0,
+          .enable_shared_kv_cache_deltas =
+              KVCacheConfig::get_instance().enable_shared_kv_cache()});
 }
 
 void VLMEngine::process_group_test() {
@@ -425,6 +427,7 @@ bool VLMEngine::allocate_kv_cache(
       return false;
     }
   }
+  forward_input_factory_->reset_shared_kv_mapping_tracker();
   kv_cache_manager_->reserve_virtual_memory_padding_blocks();
   return true;
 }
@@ -468,10 +471,8 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
   auto results = folly::collectAll(futures).get();
 
   assert(dp_size_ == worker_clients_num_ / dp_local_tp_size_);
-  for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
-       worker_rank += dp_local_tp_size_) {
-    CHECK(results[worker_rank].hasValue())
-        << "Failed to execute model, worker RPC failed";
+  for (const auto& result : results) {
+    CHECK(result.hasValue()) << "Failed to execute model, worker RPC failed";
   }
   std::vector<RawForwardOutput> outputs;
   outputs.reserve(dp_size_);
@@ -496,6 +497,7 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
     outputs.emplace_back(std::move(result.value()));
     ++dp_rank;
   }
+  forward_input_factory_->acknowledge_shared_kv_cache();
   batch.apply_outputs(outputs,
                       options_.enable_schedule_overlap()
                           ? BatchOutputAction::RESERVE_PENDING

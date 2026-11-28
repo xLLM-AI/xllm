@@ -20,12 +20,14 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/batch/shared_kv_mapping_tracker.h"
+#include "core/framework/batch/vlm_forward_input_factory.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/composite_block_manager.h"
 #include "core/framework/config/execution_config.h"
@@ -39,6 +41,7 @@ limitations under the License.
 #include "core/kv_cache/block/static_kv_block_pool.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/util/tensor_helper.h"
+#include "worker.pb.h"
 
 namespace xllm {
 namespace {
@@ -275,8 +278,54 @@ TEST(SharedKVMappingTrackerTest,
   EXPECT_EQ(reused_full_rows.size(), 3u);
 }
 
-TEST(ForwardInputFactoryTest,
-     SharedMappingsRequireAcknowledgmentAndResetWithWorkerStorage) {
+template <typename Factory>
+class SharedMappingFactoryTest : public ::testing::Test {
+ protected:
+  using Input = std::conditional_t<std::is_same_v<Factory, ForwardInputFactory>,
+                                   LlmForwardInput,
+                                   VlmForwardInput>;
+  using FactoryOptions =
+      std::conditional_t<std::is_same_v<Factory, ForwardInputFactory>,
+                         ForwardInputFactoryOptions,
+                         VlmForwardInputFactoryOptions>;
+
+  void create_inputs(Factory& factory,
+                     BatchGroup& batches,
+                     const ModelArgs& args,
+                     std::vector<Input>& inputs) {
+    if constexpr (std::is_same_v<Factory, ForwardInputFactory>) {
+      bool is_graph_warmup = false;
+      factory.create_inputs(batches, args, inputs, is_graph_warmup);
+    } else {
+      factory.create_inputs(batches, args, inputs);
+    }
+    ASSERT_EQ(inputs.size(), batches.size());
+    for (const auto& input : inputs) {
+      proto::PackedForwardInput packed;
+      ASSERT_TRUE(input.to_packed_proto(&packed));
+      Input lazy;
+      ASSERT_TRUE(lazy.from_packed_proto(packed));
+      const Input decoded =
+          lazy.to(torch::Device(torch::kCPU), torch::kFloat32);
+      EXPECT_EQ(decoded.input_params.embedding.full_block_slot_rows,
+                input.input_params.embedding.full_block_slot_rows);
+      EXPECT_EQ(decoded.input_params.embedding.full_block_lease_epochs,
+                input.input_params.embedding.full_block_lease_epochs);
+      EXPECT_EQ(decoded.input_params.embedding.linear_state_slot_rows,
+                input.input_params.embedding.linear_state_slot_rows);
+    }
+  }
+};
+
+using SharedMappingFactories =
+    ::testing::Types<ForwardInputFactory, VlmForwardInputFactory>;
+TYPED_TEST_SUITE(SharedMappingFactoryTest, SharedMappingFactories);
+
+TYPED_TEST(SharedMappingFactoryTest,
+           SharedMappingsRequireAcknowledgmentAndResetWithWorkerStorage) {
+  using Factory = TypeParam;
+  using Input = typename TestFixture::Input;
+  using FactoryOptions = typename TestFixture::FactoryOptions;
   const auto options = make_publication_block_options();
   CompositeBlockManager manager(build_composite_leaves(options), options);
   Sequence sequence = make_sequence({1, 2, 3}, "shared");
@@ -288,16 +337,15 @@ TEST(ForwardInputFactoryTest,
                     "linear_attention",
                     "linear_attention",
                     "full_attention"});
-  ForwardInputFactoryOptions factory_options;
+  FactoryOptions factory_options;
   factory_options.enable_shared_kv_cache_deltas = true;
-  ForwardInputFactory factory(factory_options);
-  std::vector<LlmForwardInput> inputs;
-  bool is_graph_warmup = false;
-  auto prepare = [&](ForwardInputFactory& selected_factory) {
+  Factory factory(factory_options);
+  std::vector<Input> inputs;
+  auto prepare = [&](Factory& selected_factory) {
     sequence.kv_state().set_kv_cache_tokens_num(0);
     BatchGroup batches(1);
     batches[0].add(&sequence);
-    selected_factory.create_inputs(batches, args, inputs, is_graph_warmup);
+    this->create_inputs(selected_factory, batches, args, inputs);
   };
   prepare(factory);
   ASSERT_EQ(inputs.size(), 1u);
@@ -308,8 +356,8 @@ TEST(ForwardInputFactoryTest,
   ASSERT_EQ(linear_rows.size(), 5u);
   const auto& attention = inputs[0].input_params.attention;
   ASSERT_TRUE(attention.host.shared_full_block_table.defined());
-  EXPECT_EQ(attention.host.block_tables.item<int32_t>(), full_rows[0]);
-  EXPECT_EQ(attention.host.shared_full_block_table.item<int32_t>(),
+  EXPECT_EQ(attention.host.block_tables.template item<int32_t>(), full_rows[0]);
+  EXPECT_EQ(attention.host.shared_full_block_table.template item<int32_t>(),
             full_rows[1]);
   EXPECT_EQ(
       tensor_to_vector<int32_t>(attention.host.shared_full_slot_mapping),
@@ -361,7 +409,7 @@ TEST(ForwardInputFactoryTest,
   EXPECT_EQ(inputs[0].input_params.embedding.linear_state_slot_rows,
             linear_rows);
 
-  ForwardInputFactory snapshot_factory(ForwardInputFactoryOptions{});
+  Factory snapshot_factory(FactoryOptions{});
   prepare(snapshot_factory);
   EXPECT_EQ(inputs[0].input_params.embedding.full_block_slot_rows, full_rows);
   snapshot_factory.acknowledge_shared_kv_cache();
@@ -371,9 +419,12 @@ TEST(ForwardInputFactoryTest,
             linear_rows);
 }
 
-TEST(ForwardInputFactoryTest,
-     SharedMappingAcknowledgmentKeepsDpAndEmptyRankCursorsIndependent) {
+TYPED_TEST(SharedMappingFactoryTest,
+           SharedMappingAcknowledgmentKeepsDpAndEmptyRankCursorsIndependent) {
   ScopedGraphMode graph_mode(true);
+  using Factory = TypeParam;
+  using Input = typename TestFixture::Input;
+  using FactoryOptions = typename TestFixture::FactoryOptions;
   const auto options = make_publication_block_options();
   CompositeBlockManager first_manager(build_composite_leaves(options), options);
   CompositeBlockManager second_manager(build_composite_leaves(options),
@@ -393,13 +444,14 @@ TEST(ForwardInputFactoryTest,
                     "linear_attention",
                     "linear_attention",
                     "full_attention"});
-  ForwardInputFactoryOptions factory_options;
+  FactoryOptions factory_options;
   factory_options.dp_size = 2;
-  factory_options.cp_size = 2;
+  if constexpr (std::is_same_v<Factory, ForwardInputFactory>) {
+    factory_options.cp_size = 2;
+  }
   factory_options.enable_shared_kv_cache_deltas = true;
-  ForwardInputFactory factory(factory_options);
-  std::vector<LlmForwardInput> inputs;
-  bool is_graph_warmup = false;
+  Factory factory(factory_options);
+  std::vector<Input> inputs;
   auto prepare = [&](bool include_first, bool include_second) {
     first.kv_state().set_kv_cache_tokens_num(0);
     second.kv_state().set_kv_cache_tokens_num(0);
@@ -410,7 +462,7 @@ TEST(ForwardInputFactoryTest,
     if (include_second) {
       batches[1].add(&second);
     }
-    factory.create_inputs(batches, args, inputs, is_graph_warmup);
+    this->create_inputs(factory, batches, args, inputs);
   };
   prepare(/*include_first=*/true, /*include_second=*/true);
   ASSERT_EQ(inputs.size(), 2u);

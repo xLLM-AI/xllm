@@ -25,12 +25,14 @@ namespace xllm {
 
 class BatchGroup;
 class ThreadPool;
+class SharedKVMappingTracker;
 struct ModelArgs;
 
 struct VlmForwardInputFactoryOptions {
   uint32_t dp_size = 1;
   bool enable_graph = false;
   bool enable_dp_global_json_object_active = false;
+  bool enable_shared_kv_cache_deltas = false;
 };
 
 // The owning engine serializes calls and reuses preparation threads.
@@ -42,6 +44,11 @@ class VlmForwardInputFactory final {
   void create_inputs(BatchGroup& batches,
                      const ModelArgs& model_args,
                      std::vector<VlmForwardInput>& inputs);
+
+  // Commit only after all workers accept the prepared input.
+  void acknowledge_shared_kv_cache();
+  // Worker cache replacement invalidates all previously published mappings.
+  void reset_shared_kv_mapping_tracker();
 
  private:
   struct PreparationState {
@@ -61,6 +68,8 @@ class VlmForwardInputFactory final {
 
   VlmForwardInputFactoryOptions options_;
   std::unique_ptr<ThreadPool> threadpool_;
+  std::vector<std::unique_ptr<SharedKVMappingTracker>>
+      dp_shared_kv_mapping_trackers_;
 };
 
 }  // namespace xllm
