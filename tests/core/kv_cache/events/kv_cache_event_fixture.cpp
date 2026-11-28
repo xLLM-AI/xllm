@@ -37,7 +37,7 @@ class FixtureBlockManagerPool final : public xllm::BlockManagerPool {
 
   xllm::BlockManager* device(int32_t rank) {
     auto* composite = block_managers_[rank].get();
-    return composite->leaf_entries().at(xllm::BlockType::KV).leaf.get();
+    return composite->leaf_entries().at(xllm::BlockType::KV).leaf;
   }
 
   bool publisher_healthy() const {

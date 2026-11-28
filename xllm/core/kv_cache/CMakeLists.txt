@@ -6,6 +6,7 @@ cc_library(
     paged_cache_partition
   HDRS
     layout/cache_partition.h
+    layout/sequence_cache_view.h
     layout/paged_cache_partition.h
   SRCS
     layout/paged_cache_partition.cpp

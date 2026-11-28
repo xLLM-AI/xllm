@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace xllm {
@@ -26,6 +27,17 @@ struct CachePartitionId {
   std::string model_id;
   uint32_t ordinal = 0;
 };
+
+inline bool operator==(const CachePartitionId& lhs,
+                       const CachePartitionId& rhs) {
+  return lhs.model_id == rhs.model_id && lhs.ordinal == rhs.ordinal;
+}
+
+inline bool operator<(const CachePartitionId& lhs,
+                      const CachePartitionId& rhs) {
+  return std::tie(lhs.model_id, lhs.ordinal) <
+         std::tie(rhs.model_id, rhs.ordinal);
+}
 
 enum class CacheComponentRole {
   KEY,

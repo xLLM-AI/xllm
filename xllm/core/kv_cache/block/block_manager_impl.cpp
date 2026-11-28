@@ -319,7 +319,7 @@ std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
   if (seq == nullptr) {
     return std::nullopt;
   }
-  const size_t held = kv_state.num_blocks(block_type());
+  const size_t held = kv_state.num_blocks(partition_id());
   const size_t num_blocks_needed = (num_tokens + block_size_ - 1) / block_size_;
   if (num_blocks_needed <= held) {
     return std::vector<Block>{};
@@ -347,11 +347,13 @@ bool BlockManagerImpl::allocate_prefetch_range(Sequence* seq,
   }
 
   KVCacheState& host_state = seq->host_kv_state();
+  host_state.bind_partition(
+      partition_id(), legacy_cache_retention(block_type()), block_type());
   const size_t target_blocks = num_tokens / block_size_;
   required_begin_block = std::min(required_begin_block, target_blocks);
-  const size_t shared_blocks = host_state.shared_blocks_num(block_type());
-  const size_t cached_blocks = host_state.num_cached_blocks(block_type());
-  std::vector<Block> blocks = host_state.take_blocks(block_type());
+  const size_t shared_blocks = host_state.shared_blocks_num(partition_id());
+  const size_t cached_blocks = host_state.num_cached_blocks(partition_id());
+  std::vector<Block> blocks = host_state.take_blocks(partition_id());
   blocks.resize(target_blocks);
 
   std::vector<size_t> missing;
@@ -386,7 +388,7 @@ bool BlockManagerImpl::allocate_prefetch_range(Sequence* seq,
   const bool complete = allocated.size() == missing.size();
 
   if (!blocks.empty()) {
-    host_state.replace_composite_blocks(block_type(),
+    host_state.replace_composite_blocks(partition_id(),
                                         std::move(blocks),
                                         std::min(shared_blocks, target_blocks),
                                         std::min(cached_blocks, target_blocks));
@@ -416,18 +418,20 @@ bool BlockManagerImpl::allocate_missing_blocks(
 void BlockManagerImpl::trim_prefetch_blocks(Sequence& seq,
                                             size_t max_hit_tokens) {
   KVCacheState& host_state = seq.host_kv_state();
+  host_state.bind_partition(
+      partition_id(), legacy_cache_retention(block_type()), block_type());
   const size_t keep = std::min(max_hit_tokens / block_size_,
-                               host_state.num_blocks(block_type()));
+                               host_state.num_blocks(partition_id()));
   const size_t cached =
-      std::min(host_state.num_cached_blocks(block_type()), keep);
-  std::vector<Block> blocks = host_state.take_blocks(block_type());
+      std::min(host_state.num_cached_blocks(partition_id()), keep);
+  std::vector<Block> blocks = host_state.take_blocks(partition_id());
   if (blocks.size() > keep) {
     deallocate(Slice<Block>(blocks).slice(keep, blocks.size()));
     blocks.resize(keep);
   }
 
   if (blocks.empty()) {
-    host_state.erase_blocks(block_type());
+    host_state.erase_blocks(partition_id());
     return;
   }
 
@@ -442,7 +446,7 @@ void BlockManagerImpl::trim_prefetch_blocks(Sequence& seq,
         seq.mm_data(),
         seq.block_hashes());
   host_state.replace_composite_blocks(
-      block_type(), std::move(blocks), keep, keep);
+      partition_id(), std::move(blocks), keep, keep);
 }
 
 }  // namespace xllm

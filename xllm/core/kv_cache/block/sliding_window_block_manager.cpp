@@ -23,8 +23,8 @@ limitations under the License.
 
 namespace xllm {
 
-SlidingWindowBlockManager::SlidingWindowBlockManager(const Options& options)
-    : BlockManagerImpl(options) {
+SlidingWindowBlockManager::SlidingWindowBlockManager(Options options)
+    : BlockManagerImpl(options.cache_retention(CacheRetention::WINDOW)) {
   CHECK_GT(options_.swa_blocks_per_seq(), 0u)
       << "swa_blocks_per_seq must be positive";
   if (options_.enable_prefix_cache()) {
@@ -48,7 +48,7 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
   if (restore_tokens > kv_state.kv_cache_tokens_num()) {
     CHECK_LE(restore_tokens, num_tokens);
     const size_t block_size = options_.block_size();
-    const size_t held = kv_state.num_blocks(block_type());
+    const size_t held = kv_state.num_blocks(partition_id());
     const size_t logical_blocks = (num_tokens + block_size - 1) / block_size;
     if (logical_blocks <= held) {
       return std::vector<Block>{};
@@ -81,7 +81,8 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
                          std::make_move_iterator(live_blocks.end()));
     return sparse_blocks;
   }
-  if (!options_.instance_is_decode() || kv_state.num_blocks(block_type()) > 0) {
+  if (!options_.instance_is_decode() ||
+      kv_state.num_blocks(partition_id()) > 0) {
     std::optional<std::vector<Block>> blocks =
         BlockManagerImpl::allocate_for_sequence(seq, kv_state, num_tokens);
     if (blocks.has_value()) {
@@ -95,7 +96,7 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
     // reclaimable blocks make the retry large enough to succeed; otherwise a
     // failed composite round must preserve the existing SWA state.
     const size_t block_size = options_.block_size();
-    const size_t held = kv_state.num_blocks(block_type());
+    const size_t held = kv_state.num_blocks(partition_id());
     const size_t num_blocks_needed = (num_tokens + block_size - 1) / block_size;
     CHECK_GT(num_blocks_needed, held);
     const size_t num_additional = num_blocks_needed - held;
@@ -140,10 +141,12 @@ bool SlidingWindowBlockManager::allocate_for_prefetch(Sequence* seq,
       std::min<size_t>(options_.swa_blocks_per_seq(), c128_span_blocks);
 
   KVCacheState& host_state = seq->host_kv_state();
+  host_state.bind_partition(
+      partition_id(), legacy_cache_retention(block_type()), block_type());
   const size_t cached_cursor =
-      std::min(host_state.num_cached_blocks(BlockType::SWA), target_blocks);
-  const size_t shared_blocks = host_state.shared_blocks_num(BlockType::SWA);
-  std::vector<Block> old = host_state.take_blocks(BlockType::SWA);
+      std::min(host_state.num_cached_blocks(partition_id()), target_blocks);
+  const size_t shared_blocks = host_state.shared_blocks_num(partition_id());
+  std::vector<Block> old = host_state.take_blocks(partition_id());
   old.resize(target_blocks);
 
   std::vector<Block> blocks(target_blocks);
@@ -169,7 +172,7 @@ bool SlidingWindowBlockManager::allocate_for_prefetch(Sequence* seq,
 
   const bool complete = allocate_missing_blocks(missing, hashes, blocks);
   if (!blocks.empty()) {
-    host_state.replace_composite_blocks(BlockType::SWA,
+    host_state.replace_composite_blocks(partition_id(),
                                         std::move(blocks),
                                         std::min(shared_blocks, target_blocks),
                                         target_blocks);
@@ -180,7 +183,9 @@ bool SlidingWindowBlockManager::allocate_for_prefetch(Sequence* seq,
 void SlidingWindowBlockManager::trim_prefetch_blocks(Sequence& seq,
                                                      size_t max_hit_tokens) {
   KVCacheState& host_state = seq.host_kv_state();
-  std::vector<Block> blocks = host_state.take_blocks(BlockType::SWA);
+  host_state.bind_partition(
+      partition_id(), legacy_cache_retention(block_type()), block_type());
+  std::vector<Block> blocks = host_state.take_blocks(partition_id());
   const size_t keep = std::min(max_hit_tokens / block_size(), blocks.size());
   size_t window_end = 0;
   for (size_t index = keep; index > 0; --index) {
@@ -212,7 +217,7 @@ void SlidingWindowBlockManager::trim_prefetch_blocks(Sequence& seq,
   blocks.resize(window_end);
   std::move(window.begin(), window.end(), blocks.begin() + window_begin);
   host_state.replace_composite_blocks(
-      BlockType::SWA, std::move(blocks), window_end, window_end);
+      partition_id(), std::move(blocks), window_end, window_end);
 }
 
 void SlidingWindowBlockManager::release_out_of_window(Sequence* seq,
@@ -229,32 +234,19 @@ void SlidingWindowBlockManager::release_out_of_window(Sequence* seq,
   if (seq == nullptr) {
     return;
   }
-  std::vector<Block>& swa_blocks = *kv_state.mutable_blocks(block_type());
   const size_t release_blocks =
       num_out_of_window_blocks(kv_state, cached_tokens);
   if (release_blocks == 0) {
     return;
   }
-  // Move slid-out blocks out (leaving invalid placeholders so positional
-  // indexing stays stable). Cache alias still pins the physical block, so
-  // deallocate walks the ref<=2u branch and only clears usage bookkeeping.
-  std::vector<Block> blocks_to_release;
-  blocks_to_release.reserve(release_blocks);
-  for (size_t j = 0; j < release_blocks; ++j) {
-    if (swa_blocks[j].is_valid()) {
-      blocks_to_release.emplace_back(std::move(swa_blocks[j]));
-    }
-  }
-  if (!blocks_to_release.empty()) {
-    deallocate(blocks_to_release);
-  }
+  kv_state.release_blocks_before(partition_id(), release_blocks);
 }
 
 size_t SlidingWindowBlockManager::num_out_of_window_blocks(
     const KVCacheState& kv_state,
     size_t cached_tokens) const {
   const size_t block_size = options_.block_size();
-  const size_t held = kv_state.num_blocks(block_type());
+  const size_t held = kv_state.num_blocks(partition_id());
   if (held == 0) {
     return 0;
   }
@@ -274,7 +266,7 @@ size_t SlidingWindowBlockManager::num_out_of_window_blocks(
 size_t SlidingWindowBlockManager::num_reclaimable_out_of_window_blocks(
     const KVCacheState& kv_state,
     size_t cached_tokens) const {
-  const Slice<Block> swa_blocks = kv_state.blocks(block_type());
+  const Slice<Block> swa_blocks = kv_state.blocks(partition_id());
   const size_t release_blocks =
       num_out_of_window_blocks(kv_state, cached_tokens);
   const uint32_t max_reclaimable_ref_count =

@@ -439,7 +439,7 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
                       "FLAT_KV_LINEAR and SWA_COMPRESSED cache layouts; got "
                    << static_cast<int32_t>(combination);
     }
-    const CompositeBlockManager::LeafMap& device_leaves =
+    const CompositeBlockManager::LegacyLeafMap& device_leaves =
         composite->leaf_entries();
     std::map<BlockType, uint32_t> host_capacities =
         options_.host_num_blocks_by_type();
@@ -922,7 +922,7 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
         continue;
       }
       hbm_probes.emplace_back(ProbeResult{type,
-                                          entry.leaf.get(),
+                                          entry.leaf,
                                           hbm_state.take_blocks(type),
                                           entry.leaf->block_size()});
     }
@@ -938,7 +938,7 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
         continue;
       }
       host_probes.emplace_back(ProbeResult{type,
-                                           entry.leaf.get(),
+                                           entry.leaf,
                                            host_state.take_blocks(type),
                                            entry.leaf->block_size()});
     }
@@ -1119,7 +1119,7 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
     const CompositeBlockManager::LeafCombination combination =
         composite->leaf_combination();
     auto* host_manager = host_block_managers_[dp_rank].get();
-    const CompositeBlockManager::LeafMap& host_leaves =
+    const CompositeBlockManager::LegacyLeafMap& host_leaves =
         host_manager->leaf_entries();
     BlockType unit_type = BlockType::KV;
     if (combination == CompositeBlockManager::LeafCombination::SWA_COMPRESSED) {

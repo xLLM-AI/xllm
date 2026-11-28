@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "core/common/types.h"
 #include "core/kv_cache/block/block.h"
+#include "core/kv_cache/block/cache_partition_binding.h"
 #include "core/util/slice.h"
 
 namespace xllm {
@@ -41,6 +42,44 @@ class KVCacheState {
   // the "up to" semantics naturally arise from mismatched host/device counters.
   void incr_kv_cache_tokens_num_up_to(size_t new_target);
 
+  // Register layout identity before mounting resources. A legacy binding is
+  // optional and exists only for worker/export callers still using BlockType.
+  void bind_partition(const CachePartitionId& id,
+                      CacheRetention retention,
+                      std::optional<BlockType> legacy_type = std::nullopt);
+  SequenceCacheView view(const CachePartitionId& id) const;
+  Slice<Block> blocks(const CachePartitionId& id) const;
+  size_t num_blocks(const CachePartitionId& id) const;
+  std::vector<int32_t> cache_slots(const CachePartitionId& id,
+                                   int32_t pos_start,
+                                   int32_t pos_end) const;
+  void add_blocks(const CachePartitionId& id, const std::vector<Block>& blocks);
+  void mount_composite_shared(const CachePartitionId& id,
+                              std::vector<Block>&& blocks);
+  void replace_composite_blocks(const CachePartitionId& id,
+                                std::vector<Block>&& blocks,
+                                size_t shared,
+                                size_t published);
+  void set_shared_blocks_num(const CachePartitionId& id, size_t num);
+  void erase_blocks(const CachePartitionId& id);
+  std::vector<Block> take_blocks(const CachePartitionId& id);
+  size_t shared_blocks_num(const CachePartitionId& id) const;
+  size_t num_cached_blocks(const CachePartitionId& id) const;
+  void set_num_cached_blocks(const CachePartitionId& id, size_t n);
+  size_t next_group_transfer_block_idx(const CachePartitionId& id) const;
+  void advance_group_transfer_block_idx(const CachePartitionId& id, size_t idx);
+
+  // Drop a logical suffix and clamp shared reach and paged publication. The
+  // recurrent publication cursor counts checkpoints, not compact live slots.
+  void truncate_blocks(const CachePartitionId& id, size_t logical_end);
+  // Release a physical prefix while retaining its logical positions (SWA).
+  void release_blocks_before(const CachePartitionId& id, size_t logical_end);
+
+  // Transitional borrow for prefix insertion and recurrent live-slot updates.
+  // Prefer mount/truncate/take operations for ownership changes.
+  std::vector<Block>* mutable_blocks(const CachePartitionId& id);
+
+  // Legacy worker-slot compatibility. New allocation paths use partition IDs.
   // Blocks held under `type`; empty slice when the type is absent.
   Slice<Block> blocks(BlockType type) const;
   // Mutable block list for `type`, created on demand.
@@ -113,7 +152,7 @@ class KVCacheState {
   //   - reset(): cleared alongside the rest of the sequence's cache state.
   size_t num_cached_blocks(BlockType type) const;
   // Per-type cursor table. Callers that need a stable snapshot must copy it.
-  const std::map<BlockType, size_t>& num_cached_blocks() const;
+  std::map<BlockType, size_t> num_cached_blocks() const;
   void set_num_cached_blocks(BlockType type, size_t n);
 
   size_t current_max_tokens_capacity() const;
@@ -154,26 +193,32 @@ class KVCacheState {
   void reset();
 
  private:
-  void remember_block_size(BlockType type, const std::vector<Block>& blocks);
+  const CachePartitionId& partition_id(BlockType type) const;
+  const CachePartitionId& writable_partition_id(BlockType type);
+  void remember_restore_point(const CachePartitionId& id,
+                              const std::vector<Block>& blocks,
+                              size_t shared);
+  void remember_block_size(const CachePartitionId& id,
+                           const std::vector<Block>& blocks);
 
   // number of tokens in kv cache
   size_t kv_cache_tokens_num_ = 0;
 
   bool prefix_cache_matched_ = false;
 
-  // KV cache blocks keyed by cache role. The flat attention KV lives under
-  // BlockType::KV; DSV4 keeps its SWA / C4 / C128 groups here; the per-sequence
-  // embedding-row slot lives under BlockType::EMBEDDING and the GDN recurrent
-  // slot under BlockType::LINEAR. std::map
-  // keeps deterministic iteration for reset / dealloc / debugging, but worker
-  // export order is governed by kMultiBlockExportOrder, not by map order.
-  std::map<BlockType, std::vector<Block>> composite_blocks_;
+  // Compatibility bindings do not own resources and are copied on fork.
+  std::map<BlockType, CachePartitionId> legacy_bindings_;
+  std::map<CachePartitionId, CacheRetention> retentions_;
+
+  // Sorted identities keep allocation/release traversal deterministic. Worker
+  // export order comes from the compatibility bindings and export order table.
+  std::map<CachePartitionId, std::vector<Block>> composite_blocks_;
 
   // Logical block size is layout metadata, not Block ownership state. Host
   // offload moves physical Block handles into an asynchronous queue and leaves
   // invalid placeholders behind, so capacity calculations cannot read size()
   // from the first current handle.
-  std::map<BlockType, size_t> block_sizes_;
+  std::map<CachePartitionId, size_t> block_sizes_;
 
   // transfer kv info for disaggregated PD mode.
   std::optional<TransferKVInfo> transfer_kv_info_;
@@ -183,13 +228,16 @@ class KVCacheState {
 
   // Cache groups can have different block sizes, so each group advances its
   // transfer cursor independently.
-  std::map<BlockType, size_t> next_group_transfer_block_idxes_;
+  std::map<CachePartitionId, size_t> next_group_transfer_block_idxes_;
 
-  // shared blocks number per block type.
-  std::map<BlockType, uint32_t> num_owned_shared_blocks_;
+  // Mounted recurrent restore boundary survives live-vector compaction.
+  std::map<CachePartitionId, size_t> restore_tokens_;
 
-  // Pre-grow cache insert cursor per block type. See num_cached_blocks() above.
-  std::map<BlockType, size_t> num_cached_blocks_;
+  // Shared logical reach per partition.
+  std::map<CachePartitionId, uint32_t> num_owned_shared_blocks_;
+
+  // Pre-grow cache insert cursor per partition. See num_cached_blocks() above.
+  std::map<CachePartitionId, size_t> num_cached_blocks_;
 
   // Number of local KV blocks already pushed to the decode instance.
   // Used for incremental push in chunked prefill + PD disagg mode.

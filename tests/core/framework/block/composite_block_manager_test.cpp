@@ -372,7 +372,7 @@ TEST(CompositeBlockManagerTest, FailedHostGrowthRollsBackAllStagedLeaves) {
   Sequence sequence = MakeTestSequence(0, std::vector<int32_t>(129, 7));
   ASSERT_TRUE(device.allocate_sequence(&sequence, 128));
   const int32_t device_id = sequence.kv_state().blocks(BlockType::C4)[0].id();
-  BlockManager* c128 = host.leaf_entries().at(BlockType::C128).leaf.get();
+  BlockManager* c128 = host.leaf_entries().at(BlockType::C128).leaf;
   auto held_blocks = c128->allocate(c128->num_free_blocks());
   std::map<BlockType, size_t> used_before;
   for (const auto& [type, entry] : host.leaf_entries()) {
@@ -1030,7 +1030,7 @@ TEST(CompositeBlockManagerTest,
       MakeTestSequence(0, std::vector<int32_t>(second_chunk_tokens, 7));
 
   ASSERT_TRUE(manager.allocate_sequence(&seq, first_chunk_tokens));
-  BlockManager* swa_leaf = manager.leaf_entries().at(BlockType::SWA).leaf.get();
+  BlockManager* swa_leaf = manager.leaf_entries().at(BlockType::SWA).leaf;
   ASSERT_NE(swa_leaf, nullptr);
   EXPECT_EQ(swa_leaf->num_free_blocks(), 0u);
 
@@ -2358,8 +2358,7 @@ TEST_P(LinearStateWindowTest, DecodeReceiverNeedsOnlyOneAvailableSlot) {
       .enable_prefix_cache(false)
       .instance_is_decode(true);
   CompositeBlockManager manager(build_composite_leaves(options), options);
-  BlockManager* linear_leaf =
-      manager.leaf_entries().at(BlockType::LINEAR).leaf.get();
+  BlockManager* linear_leaf = manager.leaf_entries().at(BlockType::LINEAR).leaf;
   auto held_slots = linear_leaf->allocate(2);
   ASSERT_EQ(held_slots.size(), 2u);
   Sequence sequence = make_sequence(0, std::vector<int32_t>(11, 7));
@@ -2601,8 +2600,7 @@ TEST_P(LinearStateWindowTest, DecodeReusesOneSlotAcrossCheckpointBoundaries) {
             sequence.append_token(Token(/*id=*/8));
           }
         }
-        BlockManager* leaf =
-            manager->leaf_entries().at(BlockType::LINEAR).leaf.get();
+        BlockManager* leaf = manager->leaf_entries().at(BlockType::LINEAR).leaf;
         EXPECT_EQ(leaf->num_used_blocks(), 1u);
         EXPECT_EQ(leaf->num_blocks_in_prefix_cache(), 0u);
         manager->deallocate_for_sequence(&sequence);
@@ -3782,7 +3780,7 @@ TEST(CompositeBlockManagerTest, RejectsPartitionsWithoutLegacyBlockBinding) {
   opts.grouped_partitions(
       test::grouped_cache_partitions(kBaseBlockSize, 128, {{8, true}}));
   EXPECT_DEATH(build_composite_leaves(opts),
-               "Unsupported legacy cache compression ratio");
+               "requires the partition-aware construction API");
 }
 
 TEST(CompositeBlockManagerTest, V41DefaultPrefixCacheDemotesInsteadOfAbort) {
@@ -3823,6 +3821,221 @@ TEST(CompositeBlockManagerTest, V4DefaultPrefixCacheKeepsRolePolicy) {
       EXPECT_TRUE(leaf->options().enable_prefix_cache());
     }
   }
+}
+
+TEST(CompositeBlockManagerTest,
+     SameHistoryStrategyUsesIndependentPartitionIds) {
+  const CachePartitionId first{"model-a", 4};
+  const CachePartitionId second{"model-a", 9};
+  const std::vector<CacheComponent> components = {
+      {CacheComponentRole::KEY, CacheScalarType::BFLOAT16, {0}}};
+  BlockManager::Options options;
+  options.num_blocks(16).enable_prefix_cache(false).grouped_partitions(
+      {PagedCachePartition(first, 4, false, components),
+       PagedCachePartition(second, 8, false, components)});
+  CompositeBlockManager manager(build_composite_partitions(options), options);
+  EXPECT_EQ(manager.num_sub_managers(), 2u);
+  EXPECT_TRUE(manager.leaf_entries().empty());
+  BlockManager* first_leaf = manager.leaf_of(first);
+  BlockManager* second_leaf = manager.leaf_of(second);
+  ASSERT_NE(first_leaf, second_leaf);
+  Sequence seq = MakeTestSequence(0, std::vector<int32_t>(64, 7));
+  ASSERT_TRUE(manager.allocate_sequence(&seq, 9));
+  EXPECT_EQ(seq.kv_state().view(first).logical_blocks, 3u);
+  EXPECT_EQ(seq.kv_state().view(second).logical_blocks, 2u);
+  EXPECT_EQ(seq.kv_state().current_max_tokens_capacity(), 12u);
+  EXPECT_FALSE(seq.kv_state().has_multi_block_export());
+  const int32_t second_id = seq.kv_state().blocks(second)[0].id();
+  ASSERT_TRUE(manager.allocate_sequence(&seq, 17));
+  EXPECT_EQ(seq.kv_state().view(first).resident_blocks, 5u);
+  EXPECT_EQ(seq.kv_state().view(second).resident_blocks, 3u);
+  seq.kv_state().truncate_blocks(first, 2);
+  EXPECT_EQ(first_leaf->num_used_blocks(), 2u);
+  EXPECT_EQ(second_leaf->num_used_blocks(), 3u);
+  EXPECT_EQ(seq.kv_state().blocks(second)[0].id(), second_id);
+  ASSERT_TRUE(manager.allocate_sequence(&seq, 17));
+  Block::release(seq.kv_state().take_blocks(first));
+  EXPECT_EQ(first_leaf->num_used_blocks(), 0u);
+  EXPECT_EQ(second_leaf->num_used_blocks(), 3u);
+  manager.deallocate_for_sequence(&seq, false);
+  EXPECT_EQ(second_leaf->num_used_blocks(), 0u);
+  EXPECT_EQ(first_leaf->num_free_blocks(), 15u);
+  EXPECT_EQ(second_leaf->num_free_blocks(), 15u);
+}
+
+TEST(CompositeBlockManagerTest,
+     SameWindowStrategyKeepsIndependentSparseExtents) {
+  const CachePartitionId narrow{"window-model", 1};
+  const CachePartitionId wide{"window-model", 2};
+  const std::vector<CacheComponent> components = {
+      {CacheComponentRole::KEY, CacheScalarType::BFLOAT16, {0}}};
+  BlockManager::Options options;
+  options.num_blocks(64)
+      .swa_num_blocks(64)
+      .swa_blocks_per_seq(8)
+      .enable_prefix_cache(false)
+      .grouped_partitions(
+          {PagedCachePartition(narrow, 4, false, components, 1, 4),
+           PagedCachePartition(wide, 8, false, components, 1, 16)});
+  CompositeBlockManager manager(build_composite_partitions(options), options);
+  Sequence seq = MakeTestSequence(0, std::vector<int32_t>(64, 7));
+  ASSERT_TRUE(manager.allocate_sequence(&seq, 32));
+  seq.kv_state().set_kv_cache_tokens_num(32);
+  manager.release_out_of_window_for_sequence(&seq);
+  EXPECT_EQ(seq.kv_state().view(narrow).logical_blocks, 8u);
+  EXPECT_EQ(seq.kv_state().view(narrow).resident_blocks, 1u);
+  EXPECT_EQ(seq.kv_state().view(wide).logical_blocks, 4u);
+  EXPECT_EQ(seq.kv_state().view(wide).resident_blocks, 2u);
+  EXPECT_TRUE(seq.kv_state().has_any_blocks());
+  ASSERT_TRUE(manager.allocate_sequence(&seq, 48));
+  seq.kv_state().set_kv_cache_tokens_num(48);
+  manager.release_out_of_window_for_sequence(&seq);
+  EXPECT_EQ(seq.kv_state().view(narrow).logical_blocks, 12u);
+  EXPECT_EQ(seq.kv_state().view(narrow).resident_blocks, 1u);
+  EXPECT_EQ(seq.kv_state().view(wide).logical_blocks, 6u);
+  EXPECT_EQ(seq.kv_state().view(wide).resident_blocks, 2u);
+  Block::release(seq.kv_state().take_blocks(narrow));
+  EXPECT_EQ(manager.leaf_of(narrow)->num_used_blocks(), 0u);
+  EXPECT_EQ(manager.leaf_of(wide)->num_used_blocks(), 2u);
+  manager.deallocate_for_sequence(&seq, false);
+  EXPECT_EQ(manager.leaf_of(wide)->num_used_blocks(), 0u);
+}
+
+TEST(CompositeBlockManagerTest, PartitionShortageReleasesOnlyStagedGrowth) {
+  const CachePartitionId coarse{"history", 1};
+  const CachePartitionId fine{"history", 2};
+  const std::vector<CacheComponent> components = {
+      {CacheComponentRole::KEY, CacheScalarType::BFLOAT16, {0}}};
+  BlockManager::Options options;
+  options.num_blocks(5).enable_prefix_cache(false).grouped_partitions(
+      {PagedCachePartition(coarse, 8, false, components),
+       PagedCachePartition(fine, 4, false, components)});
+  CompositeBlockManager manager(build_composite_partitions(options), options);
+  Sequence seq = MakeTestSequence(0, std::vector<int32_t>(64, 7));
+  ASSERT_TRUE(manager.allocate_sequence(&seq, 8));
+  const int32_t coarse_id = seq.kv_state().blocks(coarse)[0].id();
+  EXPECT_FALSE(manager.allocate_sequence(&seq, 20));
+  EXPECT_EQ(seq.kv_state().num_blocks(coarse), 1u);
+  EXPECT_EQ(seq.kv_state().num_blocks(fine), 2u);
+  EXPECT_EQ(seq.kv_state().blocks(coarse)[0].id(), coarse_id);
+  EXPECT_EQ(manager.leaf_of(coarse)->num_used_blocks(), 1u);
+  EXPECT_EQ(manager.leaf_of(coarse)->num_free_blocks(), 3u);
+  EXPECT_EQ(manager.leaf_of(fine)->num_used_blocks(), 2u);
+  ASSERT_TRUE(manager.allocate_sequence(&seq, 16));
+  manager.deallocate_for_sequence(&seq, false);
+}
+
+TEST(CompositeBlockManagerTest, NewHistoryGeometryNeedsNoWorkerEnum) {
+  const CachePartitionId id{"new-history", 7};
+  BlockManager::Options options;
+  options.num_blocks(128).enable_prefix_cache(false).grouped_partitions(
+      {PagedCachePartition(
+          id,
+          32,
+          false,
+          {{CacheComponentRole::KEY, CacheScalarType::BFLOAT16, {0}}},
+          8)});
+  CompositeBlockManager manager(build_composite_partitions(options), options);
+  EXPECT_TRUE(manager.leaf_entries().empty());
+  Sequence seq = MakeTestSequence(0, std::vector<int32_t>(64, 7));
+  ASSERT_TRUE(manager.allocate_sequence(&seq, 33));
+  EXPECT_EQ(seq.kv_state().view(id).resident_blocks, 2u);
+  EXPECT_EQ(seq.kv_state().current_max_tokens_capacity(), 64u);
+  manager.deallocate_for_sequence(&seq, false);
+}
+
+TEST(CompositeBlockManagerTest, RecurrentViewKeepsMountedCheckpointBoundary) {
+  const CachePartitionId id{"recurrent", 7};
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4).partition_id(id).enable_prefix_cache(
+      false);
+  LinearStateBlockManager leaf(options);
+  Sequence seq = MakeTestSequence(0, std::vector<int32_t>(32, 7));
+  KVCacheState& state = seq.kv_state();
+  state.bind_partition(id, CacheRetention::RECURRENT, BlockType::LINEAR);
+  std::vector<Block> sparse(4);
+  sparse.back() = leaf.allocate();
+  state.mount_composite_shared(id, std::move(sparse));
+  const SequenceCacheView mounted = state.view(id);
+  EXPECT_EQ(mounted.logical_blocks, 4u);
+  EXPECT_EQ(mounted.resident_blocks, 1u);
+  ASSERT_TRUE(mounted.restore_tokens.has_value());
+  EXPECT_EQ(*mounted.restore_tokens, 16u);
+  auto growth = leaf.allocate_for_sequence(&seq, state, 20);
+  ASSERT_TRUE(growth.has_value());
+  EXPECT_TRUE(growth->empty());
+  EXPECT_EQ(state.view(id).logical_blocks, 1u);
+  EXPECT_EQ(state.view(id).restore_tokens, std::optional<size_t>(16));
+  EXPECT_EQ(state.get_linear_block_id(), state.blocks(id).back().id());
+  state.add_blocks(id, {leaf.allocate()});
+  state.truncate_blocks(id, 1);
+  EXPECT_EQ(state.view(id).published_logical_blocks, 4u);
+  EXPECT_EQ(state.view(id).restore_tokens, std::optional<size_t>(16));
+  state.release_blocks_before(id, 1);
+  EXPECT_FALSE(state.view(id).restore_tokens.has_value());
+  EXPECT_EQ(state.view(id).logical_blocks, 1u);
+  state.reset();
+  EXPECT_EQ(leaf.num_used_blocks(), 0u);
+}
+
+TEST(CompositeBlockManagerTest, LegacyBindingMovesHandlesAndForkKeepsIdentity) {
+  BlockManager::Options options;
+  options.num_blocks(16).block_size(4).enable_prefix_cache(false).partition_id(
+      CachePartitionId{"model", 12});
+  CompositeBlockManager manager(build_composite_partitions(options), options);
+  Sequence seq = MakeTestSequence(0, std::vector<int32_t>(32, 7));
+  std::vector<Block> initial = manager.allocate_blocks(BlockType::KV, 2);
+  seq.kv_state().add_blocks(BlockType::KV, initial);
+  initial.clear();
+  seq.kv_state().set_num_cached_blocks(BlockType::KV, 1);
+  seq.kv_state().advance_group_transfer_block_idx(BlockType::KV, 2);
+  ASSERT_TRUE(manager.allocate_sequence(&seq, 8));
+  const CachePartitionId& id = *options.partition_id();
+  EXPECT_EQ(seq.kv_state().num_blocks(id), 2u);
+  EXPECT_EQ(seq.kv_state().num_cached_blocks(id), 1u);
+  EXPECT_EQ(seq.kv_state().next_group_transfer_block_idx(id), 2u);
+  EXPECT_EQ(seq.kv_state().cache_slots(id, 0, 8),
+            seq.kv_state().cache_slots(BlockType::KV, 0, 8));
+  KVCacheState fork = seq.kv_state();
+  seq.reset();
+  EXPECT_EQ(fork.num_blocks(id), 2u);
+  EXPECT_EQ(fork.blocks(id)[0].id(), fork.blocks(BlockType::KV)[0].id());
+  EXPECT_EQ(fork.next_group_transfer_block_idx(id), 2u);
+  fork.reset();
+  EXPECT_EQ(manager.leaf_of(id)->num_free_blocks(), 15u);
+}
+
+TEST(CompositeBlockManagerTest, RejectsAmbiguousLegacyTransferForPartitions) {
+  const std::vector<CacheComponent> components = {
+      {CacheComponentRole::KEY, CacheScalarType::BFLOAT16, {0}}};
+  BlockManager::Options options;
+  options.num_blocks(16)
+      .enable_prefix_cache(false)
+      .enable_disagg_pd(true)
+      .grouped_partitions(
+          {PagedCachePartition({"model", 1}, 4, false, components),
+           PagedCachePartition({"model", 2}, 8, false, components)});
+  EXPECT_DEATH(
+      {
+        CompositeBlockManager manager(build_composite_partitions(options),
+                                      options);
+      },
+      "partition-aware prefix/transfer protocols");
+}
+
+TEST(CompositeBlockManagerTest, RejectsDuplicateFlatPartitionIdentities) {
+  BlockManager::Options options;
+  const CachePartitionId id{"model", 7};
+  options.num_blocks(16)
+      .block_size(4)
+      .enable_prefix_cache(false)
+      .enable_linear_state(true)
+      .linear_state_num_slots(8)
+      .partition_id(id)
+      .linear_partition_id(id);
+  EXPECT_DEATH(
+      { build_composite_partitions(options); },
+      "distinct model-scoped identities");
 }
 
 }  // namespace xllm
