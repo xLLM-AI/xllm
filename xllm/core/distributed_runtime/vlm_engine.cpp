@@ -140,14 +140,15 @@ VLMEngine::VLMEngine(
   process_group_test();
 
   forward_input_factory_ =
-      std::make_unique<VlmForwardInputFactory>(VlmForwardInputFactoryOptions{
-          .dp_size = dp_size_,
-          .enable_graph = options_.enable_graph(),
-          .enable_dp_global_json_object_active =
-              dp_size_ > 1 && !options_.is_draft_engine() &&
-              options_.num_speculative_tokens() > 0,
-          .enable_shared_kv_cache_deltas =
-              KVCacheConfig::get_instance().enable_shared_kv_cache()});
+      std::make_unique<ForwardInputFactory<VlmForwardInput>>(
+          ForwardInputFactoryOptions{
+              .dp_size = dp_size_,
+              .enable_graph = options_.enable_graph(),
+              .enable_dp_global_json_object_active =
+                  dp_size_ > 1 && !options_.is_draft_engine() &&
+                  options_.num_speculative_tokens() > 0,
+              .enable_shared_kv_cache_deltas =
+                  KVCacheConfig::get_instance().enable_shared_kv_cache()});
 }
 
 void VLMEngine::process_group_test() {

@@ -124,7 +124,7 @@ class LLMEngine : public Engine {
   // Effective TP width (MLU=dp_local; NPU=dp_local/cp).
   uint32_t dp_local_tp_size_;
   uint32_t dp_local_size_;
-  std::unique_ptr<ForwardInputFactory> forward_input_factory_;
+  std::unique_ptr<ForwardInputFactory<LlmForwardInput>> forward_input_factory_;
 
   // For multi-node serving
   // engine brpc server, all workers connect to engine_server_,

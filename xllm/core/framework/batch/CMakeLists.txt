@@ -35,7 +35,6 @@ cc_library(
     batch_factory.h
     forward_input_builder.h
     forward_input_factory.h
-    vlm_forward_input_factory.h
     sampling_input_builder.h
     shared_kv_mapping_tracker.h
   SRCS
@@ -52,7 +51,6 @@ cc_library(
     batch_factory.cpp
     forward_input_builder.cpp
     forward_input_factory.cpp
-    vlm_forward_input_factory.cpp
     sampling_input_builder.cpp
     shared_kv_mapping_tracker.cpp
   DEPS

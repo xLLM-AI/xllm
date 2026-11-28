@@ -25,7 +25,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
-#include "core/framework/batch/vlm_forward_input_factory.h"
+#include "core/framework/batch/forward_input_factory.h"
 #include "engine.h"
 #include "framework/batch/batch_group.h"
 #include "framework/block/block_manager_pool.h"
@@ -106,7 +106,7 @@ class VLMEngine : public Engine {
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_ =
       nullptr;
 
-  std::unique_ptr<VlmForwardInputFactory> forward_input_factory_;
+  std::unique_ptr<ForwardInputFactory<VlmForwardInput>> forward_input_factory_;
   std::mutex profile_mutex_;
   int64_t initial_weight_reservation_bytes_ = 0;
 };

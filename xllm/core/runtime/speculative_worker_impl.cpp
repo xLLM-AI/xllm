@@ -78,7 +78,8 @@ void prepare_dummy_input(Input& input, const WorkerImpl& worker) {
     params.attention.host.kv_cache_tokens_nums = {0};
     params.attention.host.new_cache_slots.assign(query_width,
                                                  /*value=*/-1);
-    params.attention.rebuild_device_buffer(device);
+    params.attention.rebuild_device_buffer(
+        context.get_tensor_options().device());
   }
 }
 

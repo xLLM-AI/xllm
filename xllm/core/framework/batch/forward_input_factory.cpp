@@ -31,7 +31,9 @@ limitations under the License.
 
 namespace xllm {
 
-ForwardInputFactory::ForwardInputFactory(ForwardInputFactoryOptions options)
+template <typename Input>
+ForwardInputFactory<Input>::ForwardInputFactory(
+    ForwardInputFactoryOptions options)
     : options_(options) {
   CHECK_GT(options_.dp_size, 0);
   CHECK_GT(options_.cp_size, 0);
@@ -52,16 +54,19 @@ ForwardInputFactory::ForwardInputFactory(ForwardInputFactoryOptions options)
       /*pool_name=*/"ForwardInputFactory.forward_input");
 }
 
-ForwardInputFactory::~ForwardInputFactory() = default;
-ForwardInputFactory::ForwardInputFactory(ForwardInputFactory&&) noexcept =
-    default;
-ForwardInputFactory& ForwardInputFactory::operator=(
+template <typename Input>
+ForwardInputFactory<Input>::~ForwardInputFactory() = default;
+template <typename Input>
+ForwardInputFactory<Input>::ForwardInputFactory(
+    ForwardInputFactory&&) noexcept = default;
+template <typename Input>
+ForwardInputFactory<Input>& ForwardInputFactory<Input>::operator=(
     ForwardInputFactory&&) noexcept = default;
 
-void ForwardInputFactory::create_inputs(BatchGroup& batches,
-                                        const ModelArgs& model_args,
-                                        std::vector<LlmForwardInput>& inputs,
-                                        bool& is_graph_warmup) {
+template <typename Input>
+bool ForwardInputFactory<Input>::create_inputs(BatchGroup& batches,
+                                               const ModelArgs& model_args,
+                                               std::vector<Input>& inputs) {
   CHECK_EQ(batches.size(), options_.dp_size)
       << "Split DP batch failed with dp_size as " << options_.dp_size
       << " and actual batch size as " << batches.size() << ".";
@@ -84,38 +89,52 @@ void ForwardInputFactory::create_inputs(BatchGroup& batches,
   finalize_inputs(state);
 
   inputs = std::move(state.inputs);
-  is_graph_warmup = state.is_graph_warmup;
+  return state.is_graph_warmup;
 }
 
-void ForwardInputFactory::acknowledge_shared_kv_cache() {
+template <typename Input>
+void ForwardInputFactory<Input>::acknowledge_shared_kv_cache() {
   for (const auto& mapping_tracker : dp_shared_kv_mapping_trackers_) {
     mapping_tracker->acknowledge();
   }
 }
 
-void ForwardInputFactory::reset_shared_kv_mapping_tracker() {
+template <typename Input>
+void ForwardInputFactory<Input>::reset_shared_kv_mapping_tracker() {
   for (const auto& mapping_tracker : dp_shared_kv_mapping_trackers_) {
     mapping_tracker->reset();
   }
 }
 
-void ForwardInputFactory::set_eplb_controller(EplbController* controller) {
+template <typename Input>
+void ForwardInputFactory<Input>::set_eplb_controller(EplbController* controller)
+  requires std::is_same_v<Input, LlmForwardInput>
+{
   eplb_controller_ = controller;
 }
 
-void ForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
-                                              const ModelArgs& model_args,
-                                              PreparationState& state) {
+template <typename Input>
+void ForwardInputFactory<Input>::prepare_rank_inputs(
+    BatchGroup& batches,
+    const ModelArgs& model_args,
+    PreparationState& state) {
   for (uint32_t dp_rank = 0; dp_rank < options_.dp_size; ++dp_rank) {
     SharedKVMappingTracker* mapping_tracker =
         options_.enable_shared_kv_cache_deltas
             ? dp_shared_kv_mapping_trackers_[dp_rank].get()
             : nullptr;
-    state.inputs.emplace_back(batches[dp_rank].prepare_forward_input(
-        model_args,
-        threadpool_.get(),
-        static_cast<int32_t>(options_.cp_size),
-        mapping_tracker));
+    if (std::is_same_v<Input, VlmForwardInput> && batches[dp_rank].empty()) {
+      Input empty_input;
+      empty_input.input_params.meta.batch_forward_type = BatchForwardType();
+      empty_input.input_params.meta.batch_id = UNINITIALIZED_BATCH_ID;
+      state.inputs.emplace_back(std::move(empty_input));
+    } else {
+      const int32_t cp_size = std::is_same_v<Input, LlmForwardInput>
+                                  ? static_cast<int32_t>(options_.cp_size)
+                                  : 1;
+      state.inputs.emplace_back(batches[dp_rank].prepare_forward_input<Input>(
+          model_args, threadpool_.get(), cp_size, mapping_tracker));
+    }
     const auto& input = state.inputs[dp_rank];
     const auto& meta = input.input_params.meta;
     const BatchForwardType& current_forward_type = meta.batch_forward_type;
@@ -128,7 +147,8 @@ void ForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
           !input.json_object_states.empty() ||
           !input.json_object_state_snapshots.empty();
     }
-    if (is_deepseek_v4_family(model_args.model_type())) {
+    if (std::is_same_v<Input, LlmForwardInput> &&
+        is_deepseek_v4_family(model_args.model_type())) {
       const int64_t actual_scheduled_tokens =
           static_cast<int64_t>(input.host_token_ids().numel());
       CHECK_LE(actual_scheduled_tokens, options_.max_tokens_per_batch)
@@ -168,7 +188,8 @@ void ForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
   }
 }
 
-void ForwardInputFactory::finalize_inputs(PreparationState& state) {
+template <typename Input>
+void ForwardInputFactory<Input>::finalize_inputs(PreparationState& state) {
   // Graph decode requires empty ranks to participate using Worker fake inputs.
   if (options_.enable_graph && state.batch_forward_type.is_decode()) {
     for (uint32_t dp_rank = 0; dp_rank < options_.dp_size; ++dp_rank) {
@@ -212,15 +233,20 @@ void ForwardInputFactory::finalize_inputs(PreparationState& state) {
   last_parallel.dp_is_decode = std::move(state.dp_is_decode);
 }
 
-void ForwardInputFactory::annotate_eplb_inputs(PreparationState& state) {
-  if (eplb_controller_ == nullptr) {
-    return;
+template <typename Input>
+void ForwardInputFactory<Input>::annotate_eplb_inputs(PreparationState& state) {
+  if constexpr (std::is_same_v<Input, LlmForwardInput>) {
+    if (eplb_controller_ != nullptr) {
+      eplb_controller_->annotate_inputs(
+          state.inputs,
+          state.dp_token_counts,
+          /*allow_eplb_command=*/state.has_non_empty_batch &&
+              state.all_non_empty_batches_are_decode && !state.is_graph_warmup);
+    }
   }
-  eplb_controller_->annotate_inputs(
-      state.inputs,
-      state.dp_token_counts,
-      /*allow_eplb_command=*/state.has_non_empty_batch &&
-          state.all_non_empty_batches_are_decode && !state.is_graph_warmup);
 }
+
+template class ForwardInputFactory<LlmForwardInput>;
+template class ForwardInputFactory<VlmForwardInput>;
 
 }  // namespace xllm

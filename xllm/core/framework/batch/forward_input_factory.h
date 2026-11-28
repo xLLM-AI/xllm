@@ -18,9 +18,11 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "core/runtime/forward_params.h"
+#include "core/runtime/vlm_forward_params.h"
 
 namespace xllm {
 
@@ -42,6 +44,7 @@ struct ForwardInputFactoryOptions {
 
 // One engine-owned instance retains rank identities and reuses preparation
 // threads across scheduler steps. Calls must be serialized by its owner.
+template <typename Input>
 class ForwardInputFactory final {
  public:
   explicit ForwardInputFactory(ForwardInputFactoryOptions options);
@@ -52,10 +55,10 @@ class ForwardInputFactory final {
   ForwardInputFactory& operator=(ForwardInputFactory&&) noexcept;
 
   // Advances Batch/Sequence preparation state; prepare each group only once.
-  void create_inputs(BatchGroup& batches,
+  // Returns whether this step contains graph warmup input.
+  bool create_inputs(BatchGroup& batches,
                      const ModelArgs& model_args,
-                     std::vector<LlmForwardInput>& inputs,
-                     bool& is_graph_warmup);
+                     std::vector<Input>& inputs);
 
   // Call only after every TP/CP worker has successfully accepted its DP input.
   void acknowledge_shared_kv_cache();
@@ -63,11 +66,12 @@ class ForwardInputFactory final {
   void reset_shared_kv_mapping_tracker();
 
   // The controller remains owned by LLMEngine and must outlive this factory.
-  void set_eplb_controller(EplbController* controller);
+  void set_eplb_controller(EplbController* controller)
+    requires std::is_same_v<Input, LlmForwardInput>;
 
  private:
   struct PreparationState {
-    std::vector<LlmForwardInput> inputs;
+    std::vector<Input> inputs;
     std::vector<int32_t> dp_token_counts;
     std::vector<int32_t> dp_sequence_counts;
     std::vector<int32_t> dp_kv_max_seq_lens;

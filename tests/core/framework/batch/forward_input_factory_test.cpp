@@ -27,7 +27,6 @@ limitations under the License.
 
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/batch/shared_kv_mapping_tracker.h"
-#include "core/framework/batch/vlm_forward_input_factory.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/composite_block_manager.h"
 #include "core/framework/config/execution_config.h"
@@ -45,6 +44,9 @@ limitations under the License.
 
 namespace xllm {
 namespace {
+
+using LlmInputFactory = ForwardInputFactory<LlmForwardInput>;
+using VlmInputFactory = ForwardInputFactory<VlmForwardInput>;
 
 RequestSamplingParam& test_sampling_params() {
   static RequestSamplingParam params;
@@ -99,18 +101,17 @@ Batch make_batch(Sequence* sequence) {
   return batch;
 }
 
-ForwardInputFactory make_factory(
-    uint32_t dp_size,
-    uint32_t cp_size = 1,
-    int64_t max_tokens_per_batch = 0,
-    bool enable_dp_global_json_object_active = false) {
+LlmInputFactory make_factory(uint32_t dp_size,
+                             uint32_t cp_size = 1,
+                             int64_t max_tokens_per_batch = 0,
+                             bool enable_dp_global_json_object_active = false) {
   ForwardInputFactoryOptions options;
   options.dp_size = dp_size;
   options.cp_size = cp_size;
   options.max_tokens_per_batch = max_tokens_per_batch;
   options.enable_dp_global_json_object_active =
       enable_dp_global_json_object_active;
-  return ForwardInputFactory(options);
+  return LlmInputFactory(options);
 }
 
 class ScopedGraphMode final {
@@ -281,24 +282,16 @@ TEST(SharedKVMappingTrackerTest,
 template <typename Factory>
 class SharedMappingFactoryTest : public ::testing::Test {
  protected:
-  using Input = std::conditional_t<std::is_same_v<Factory, ForwardInputFactory>,
+  using Input = std::conditional_t<std::is_same_v<Factory, LlmInputFactory>,
                                    LlmForwardInput,
                                    VlmForwardInput>;
-  using FactoryOptions =
-      std::conditional_t<std::is_same_v<Factory, ForwardInputFactory>,
-                         ForwardInputFactoryOptions,
-                         VlmForwardInputFactoryOptions>;
+  using FactoryOptions = ForwardInputFactoryOptions;
 
   void create_inputs(Factory& factory,
                      BatchGroup& batches,
                      const ModelArgs& args,
                      std::vector<Input>& inputs) {
-    if constexpr (std::is_same_v<Factory, ForwardInputFactory>) {
-      bool is_graph_warmup = false;
-      factory.create_inputs(batches, args, inputs, is_graph_warmup);
-    } else {
-      factory.create_inputs(batches, args, inputs);
-    }
+    factory.create_inputs(batches, args, inputs);
     ASSERT_EQ(inputs.size(), batches.size());
     for (const auto& input : inputs) {
       proto::PackedForwardInput packed;
@@ -318,7 +311,7 @@ class SharedMappingFactoryTest : public ::testing::Test {
 };
 
 using SharedMappingFactories =
-    ::testing::Types<ForwardInputFactory, VlmForwardInputFactory>;
+    ::testing::Types<LlmInputFactory, VlmInputFactory>;
 TYPED_TEST_SUITE(SharedMappingFactoryTest, SharedMappingFactories);
 
 TYPED_TEST(SharedMappingFactoryTest,
@@ -446,7 +439,7 @@ TYPED_TEST(SharedMappingFactoryTest,
                     "full_attention"});
   FactoryOptions factory_options;
   factory_options.dp_size = 2;
-  if constexpr (std::is_same_v<Factory, ForwardInputFactory>) {
+  if constexpr (std::is_same_v<Factory, LlmInputFactory>) {
     factory_options.cp_size = 2;
   }
   factory_options.enable_shared_kv_cache_deltas = true;
@@ -511,8 +504,7 @@ TEST(ForwardInputFactoryTest, AggregatesDpMetadataAndMixedForwardTypes) {
       /*max_tokens_per_batch=*/0,
       /*enable_dp_global_json_object_active=*/true);
   std::vector<LlmForwardInput> inputs;
-  bool is_graph_warmup = false;
-  factory.create_inputs(batches, ModelArgs(), inputs, is_graph_warmup);
+  factory.create_inputs(batches, ModelArgs(), inputs);
 
   ASSERT_EQ(inputs.size(), 2u);
   EXPECT_EQ(inputs[0].input_params.parallel.dp_global_token_nums,
@@ -559,8 +551,7 @@ TEST(ForwardInputFactoryTest, DpMetadataIsIndependentAcrossRanksAndCalls) {
       /*max_tokens_per_batch=*/0,
       /*enable_dp_global_json_object_active=*/true);
   std::vector<LlmForwardInput> inputs;
-  bool is_graph_warmup = false;
-  factory.create_inputs(batches, ModelArgs(), inputs, is_graph_warmup);
+  factory.create_inputs(batches, ModelArgs(), inputs);
 
   ASSERT_EQ(inputs.size(), 3u);
   const std::vector<int32_t> token_counts = {2, 3, 0};
@@ -614,8 +605,7 @@ TEST(ForwardInputFactoryTest, DpMetadataIsIndependentAcrossRanksAndCalls) {
 
   BatchGroup empty_batches(3);
   std::vector<LlmForwardInput> next_inputs;
-  factory.create_inputs(
-      empty_batches, ModelArgs(), next_inputs, is_graph_warmup);
+  factory.create_inputs(empty_batches, ModelArgs(), next_inputs);
   ASSERT_EQ(next_inputs.size(), 3u);
   for (const auto& input : next_inputs) {
     const auto& parallel = input.input_params.parallel;
@@ -662,11 +652,10 @@ TEST(ForwardInputFactoryTest, EmptyRanksUseInstanceGraphDecodeOption) {
       ForwardInputFactoryOptions options;
       options.dp_size = 2;
       options.enable_graph = enable_graph;
-      ForwardInputFactory factory(options);
+      LlmInputFactory factory(options);
       options.enable_graph = !enable_graph;
       std::vector<LlmForwardInput> inputs;
-      bool is_graph_warmup = false;
-      factory.create_inputs(batches, ModelArgs(), inputs, is_graph_warmup);
+      factory.create_inputs(batches, ModelArgs(), inputs);
 
       ASSERT_EQ(inputs.size(), 2u);
       for (const auto& input : inputs) {
@@ -693,9 +682,8 @@ TEST(ForwardInputFactoryTest, PropagatesGraphWarmupAndHandlesAllEmptyGroup) {
   warmup_batches[0] = make_batch(&warmup);
   auto factory = make_factory(/*dp_size=*/2);
   std::vector<LlmForwardInput> warmup_inputs;
-  bool warmup_is_graph_warmup = false;
-  factory.create_inputs(
-      warmup_batches, ModelArgs(), warmup_inputs, warmup_is_graph_warmup);
+  const bool warmup_is_graph_warmup =
+      factory.create_inputs(warmup_batches, ModelArgs(), warmup_inputs);
   EXPECT_TRUE(warmup_is_graph_warmup);
   for (const auto& input : warmup_inputs) {
     EXPECT_TRUE(input.input_params.meta.is_graph_warmup);
@@ -703,9 +691,8 @@ TEST(ForwardInputFactoryTest, PropagatesGraphWarmupAndHandlesAllEmptyGroup) {
 
   BatchGroup empty_batches(2);
   std::vector<LlmForwardInput> empty_inputs;
-  bool empty_is_graph_warmup = true;
-  factory.create_inputs(
-      empty_batches, ModelArgs(), empty_inputs, empty_is_graph_warmup);
+  const bool empty_is_graph_warmup =
+      factory.create_inputs(empty_batches, ModelArgs(), empty_inputs);
   EXPECT_FALSE(empty_is_graph_warmup);
   EXPECT_EQ(empty_inputs[0].input_params.parallel.dp_global_token_nums,
             (std::vector<int32_t>{0, 0}));
@@ -732,8 +719,7 @@ TEST(ForwardInputFactoryTest, KeepsOneInputPerDpRankForContextParallelism) {
   batches[1] = make_batch(&second);
   auto factory = make_factory(/*dp_size=*/2, /*cp_size=*/3);
   std::vector<LlmForwardInput> inputs;
-  bool is_graph_warmup = false;
-  factory.create_inputs(batches, ModelArgs(), inputs, is_graph_warmup);
+  factory.create_inputs(batches, ModelArgs(), inputs);
 
   ASSERT_EQ(inputs.size(), 2u);
   EXPECT_EQ(inputs[0].input_params.meta.num_sequences, 1);
@@ -758,9 +744,7 @@ TEST(ForwardInputFactoryTest, TracksEmbeddingGenerationAcrossBatchSteps) {
   BatchGroup first_batches(1);
   first_batches[0] = make_batch(&first);
   std::vector<LlmForwardInput> first_inputs;
-  bool first_is_graph_warmup = false;
-  factory.create_inputs(
-      first_batches, ModelArgs(), first_inputs, first_is_graph_warmup);
+  factory.create_inputs(first_batches, ModelArgs(), first_inputs);
   ASSERT_EQ(
       first_inputs[0].input_params.parallel.dp_global_batch_generations.size(),
       1u);
@@ -771,9 +755,7 @@ TEST(ForwardInputFactoryTest, TracksEmbeddingGenerationAcrossBatchSteps) {
   BatchGroup second_batches(1);
   second_batches[0] = make_batch(&second);
   std::vector<LlmForwardInput> second_inputs;
-  bool second_is_graph_warmup = false;
-  factory.create_inputs(
-      second_batches, ModelArgs(), second_inputs, second_is_graph_warmup);
+  factory.create_inputs(second_batches, ModelArgs(), second_inputs);
   EXPECT_GT(
       second_inputs[0].input_params.parallel.dp_global_batch_generations[0],
       first_generation);
@@ -794,8 +776,7 @@ TEST(ForwardInputFactoryTest, EnforcesDeepseekV4BatchTokenBudget) {
                               /*cp_size=*/1,
                               /*max_tokens_per_batch=*/3);
   std::vector<LlmForwardInput> inputs;
-  bool is_graph_warmup = false;
-  factory.create_inputs(batches, args, inputs, is_graph_warmup);
+  factory.create_inputs(batches, args, inputs);
   ASSERT_EQ(inputs[0].input_params.parallel.dp_global_token_nums,
             (std::vector<int32_t>{3}));
   EXPECT_EQ(inputs[0].host_token_ids().numel(), 3);
@@ -813,8 +794,7 @@ TEST(ForwardInputFactoryTest, PreparationAdvancesSequenceKvCursor) {
   batches[0] = make_batch(&sequence);
   auto factory = make_factory(/*dp_size=*/1);
   std::vector<LlmForwardInput> inputs;
-  bool is_graph_warmup = false;
-  factory.create_inputs(batches, ModelArgs(), inputs, is_graph_warmup);
+  factory.create_inputs(batches, ModelArgs(), inputs);
   EXPECT_EQ(sequence.kv_state().kv_cache_tokens_num(), 3u);
 }
 
