@@ -43,6 +43,7 @@ class MMBatchData {
 
   bool has(const MMKey& key) const;
   void get(const MMKey& key, std::vector<torch::Tensor>& vec) const;
+  void merge_visual_embeddings(torch::Tensor& inputs_embeds) const;
 
   void to(const torch::Device& device);
   static MMBatchData to(const MMBatchData& mm_data,

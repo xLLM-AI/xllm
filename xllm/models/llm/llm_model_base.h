@@ -48,33 +48,22 @@ class LlmModelImplBase : public torch::nn::Module {
     return std::make_pair(torch::Tensor(), torch::Tensor());
   }
 
-  // tokens: [num_tokens]
-  // positions: [num_tokens] token pos in the sequence
-  virtual ModelOutput forward(torch::Tensor tokens,
-                              torch::Tensor positions,
-                              std::vector<KVCache>& kv_caches,
-                              const ModelParamsView& input_params) {
-    auto local_params = input_params.clone().view();
-    return forward_impl(tokens, positions, kv_caches, local_params);
+  virtual ModelOutput forward_from_embeddings(
+      torch::Tensor h,
+      torch::Tensor positions,
+      std::vector<KVCache>& kv_caches,
+      const ModelParamsView& input_params) {
+    return forward_impl(std::move(h),
+                        std::move(positions),
+                        kv_caches,
+                        input_params.clone().view());
   }
 
-  template <typename InputParams>
-  ModelOutput forward_impl(torch::Tensor tokens,
+ protected:
+  ModelOutput forward_impl(torch::Tensor h,
                            torch::Tensor positions,
                            std::vector<KVCache>& kv_caches,
-                           InputParams& input_params) {
-    if (tokens.numel() == 0) {
-      tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-      positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-    }
-    auto inputs_embeds = input_params.embedding.input_embedding;
-    torch::Tensor h;
-    if (inputs_embeds.defined()) {
-      h = inputs_embeds;
-    } else {
-      h = embed_tokens_(tokens);
-    }
-
+                           const ModelParamsView& input_params) {
     auto& dp_token_nums = input_params.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
     if (!input_params.attn_metadata) {
@@ -119,6 +108,7 @@ class LlmModelImplBase : public torch::nn::Module {
     return ModelOutput(hidden_states, residual_out);
   }
 
+ public:
   // load the weight from the checkpoint
   virtual void load_state_dict(const StateDict& state_dict) {
     embed_tokens_->load_state_dict(
@@ -226,24 +216,38 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     return h;
   }
 
-  // tokens: [num_tokens]
-  // positions: [num_tokens] token pos in the sequence
-  // returns: [num_tokens, hidden_size]
   virtual ModelOutput forward(const torch::Tensor& tokens,
                               const torch::Tensor& positions,
                               std::vector<KVCache>& kv_caches,
                               const ModelParamsView& input_params) {
-    return model_->forward(tokens, positions, kv_caches, input_params);
+    if constexpr (requires {
+                    model_->forward(tokens, positions, kv_caches, input_params);
+                  }) {
+      return model_->forward(tokens, positions, kv_caches, input_params);
+    } else {
+      auto model_tokens = tokens;
+      auto model_positions = positions;
+      if (tokens.numel() == 0) {
+        model_tokens = torch::tensor(/*values=*/{1}, /*options=*/torch::kInt32).to(tokens.device());
+        model_positions = model_tokens;
+      }
+      return model_->forward_from_embeddings(
+          prepare_inputs_embeds(model_tokens,
+                                input_params.embedding.input_embedding),
+          std::move(model_positions),
+          kv_caches,
+          input_params);
+    }
   }
 
-  template <typename InputParams>
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const InputParams& input_params) {
-    return model_->forward(tokens, positions, kv_caches, input_params);
+ protected:
+  torch::Tensor prepare_inputs_embeds(const torch::Tensor& tokens,
+                                      const torch::Tensor& input_embedding) {
+    return input_embedding.defined() ? input_embedding
+                                     : get_input_embeddings(tokens);
   }
 
+ public:
   virtual void load_model(
       std::unique_ptr<ModelLoader> loader,
       std::string prefix = "model." /*llm model weight prefix*/) {

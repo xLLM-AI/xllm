@@ -57,8 +57,6 @@ class Qwen3_5ModelImpl final
       : LlmModelImplBase<layer::Qwen3_5DecoderLayer>(context.get_model_args()) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
-    auto parallel_args = context.get_parallel_args();
-    dp_size_ = parallel_args.dp_size();
 
     if (!mrope_section_.empty()) {
       int64_t rotary_dim = static_cast<int64_t>(
@@ -101,23 +99,11 @@ class Qwen3_5ModelImpl final
     return layer::rotary::apply_mrope(cos_sin_, positions, mrope_section_);
   }
 
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) override {
-    if (dp_size_ > 1) {
-      if (tokens.numel() == 0) {
-        tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-        positions = torch::tensor({1}).to(torch::kInt32).to(positions.device());
-      }
-      auto& dp_token_nums = input_params.parallel.dp_global_token_nums;
-      std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
-    }
-
-    torch::Tensor h = input_params.embedding.input_embedding.defined()
-                          ? input_params.embedding.input_embedding
-                          : embed_tokens_(tokens);
-
+  ModelOutput forward_from_embeddings(
+      torch::Tensor h,
+      torch::Tensor positions,
+      std::vector<KVCache>& kv_caches,
+      const ModelParamsView& input_params) override {
     // Prepared graph metadata preserves the captured bucket's history bounds.
     std::optional<layer::AttentionMetadata> derived_attn_metadata;
     if (!input_params.attn_metadata) {
@@ -143,7 +129,6 @@ class Qwen3_5ModelImpl final
   }
 
  private:
-  int32_t dp_size_ = 1;
   layer::Qwen3NextRMSNorm rms_norm_{nullptr};
   layer::AttentionMetadata get_attention_metadata(const ModelParamsView& params,
                                                   const torch::Tensor& h) {
@@ -168,7 +153,34 @@ TORCH_MODULE(Qwen3_5Model);
 class Qwen3_5ForCausalLMImpl : public LlmForCausalLMImplBase<Qwen3_5Model> {
  public:
   Qwen3_5ForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<Qwen3_5Model>(context) {}
+      : LlmForCausalLMImplBase<Qwen3_5Model>(context),
+        dp_enabled_(context.get_parallel_args().dp_size() > 1) {}
+
+  ModelOutput forward(const torch::Tensor& tokens,
+                      const torch::Tensor& positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelParamsView& input_params) override {
+    auto model_tokens = tokens;
+    auto model_positions = positions;
+    if (dp_enabled_) {
+      if (tokens.numel() == 0) {
+        model_tokens = torch::tensor(/*values=*/{1}, /*options=*/torch::kInt32).to(tokens.device());
+        model_positions =
+            torch::tensor(/*values=*/{1}, /*options=*/torch::kInt32).to(positions.device());
+      }
+      auto& dp_token_nums = input_params.parallel.dp_global_token_nums;
+      std::replace(dp_token_nums.begin(),
+                   dp_token_nums.end(),
+                   /*old_value=*/0,
+                   /*new_value=*/1);
+    }
+    return model_->forward_from_embeddings(
+        prepare_inputs_embeds(model_tokens,
+                              input_params.embedding.input_embedding),
+        std::move(model_positions),
+        kv_caches,
+        input_params);
+  }
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
@@ -179,6 +191,9 @@ class Qwen3_5ForCausalLMImpl : public LlmForCausalLMImplBase<Qwen3_5Model> {
     namespace F = torch::nn::functional;
     return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));
   }
+
+ private:
+  const bool dp_enabled_;
 };
 TORCH_MODULE(Qwen3_5ForCausalLM);
 

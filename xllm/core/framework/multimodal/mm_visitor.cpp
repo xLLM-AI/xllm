@@ -28,6 +28,47 @@ limitations under the License.
 namespace xllm {
 
 namespace {
+class EncoderInputGatherVisitor : public MMDataItem::IVisitor {
+ public:
+  bool visit(MMDataItem& item) override;
+  void finish(MMBatchData& mm_data);
+
+ private:
+  std::unordered_map<MMKey, std::vector<torch::Tensor>> datas_;
+};
+
+class EncoderOutputScatterVisitor : public MMDataItem::IVisitor {
+ public:
+  explicit EncoderOutputScatterVisitor(const MMDict& data) : data_(data) {}
+
+  bool visit(MMDataItem& data) override;
+  bool finish() const;
+
+ private:
+  const MMDict& data_;
+  int32_t image_idx_ = 0;
+  int32_t video_idx_ = 0;
+  int32_t audio_idx_ = 0;
+};
+
+class EncoderCacheLookupVisitor : public MMDataItem::IVisitor {
+ public:
+  explicit EncoderCacheLookupVisitor(EncoderCache* cache);
+  bool visit(MMDataItem& item) override;
+
+ private:
+  EncoderCache* cache_;
+};
+
+class EncoderCacheInsertVisitor : public MMDataItem::IVisitor {
+ public:
+  explicit EncoderCacheInsertVisitor(EncoderCache* cache);
+  bool visit(MMDataItem& item) override;
+
+ private:
+  EncoderCache* cache_;
+};
+
 MMDict build_embedding_data(MMType type, const EmbeddingOutput& embedding) {
   MMDict data;
   data[get_embedding_key(type)] = embedding.embedding;
@@ -40,7 +81,7 @@ MMDict build_embedding_data(MMType type, const EmbeddingOutput& embedding) {
 std::pair<int32_t, int32_t> compute_emb_range(int32_t start_pos,
                                               int32_t end_pos,
                                               const torch::Tensor& mask) {
-  if (!mask.defined() || mask.numel() == 0) {
+  if (mask.numel() == 0) {
     return {start_pos, end_pos};
   }
   auto mask_cpu = mask.to(torch::kCPU);
@@ -184,7 +225,9 @@ bool EncoderInputGatherVisitor::visit(MMDataItem& item) {
   if (item.is_embedded()) return true;
 
   for (const auto& [key, value] : item.data()) {
-    if (absl::StartsWith(key, filter_prefix_)) continue;
+    if (absl::StartsWith(key, /*prefix=*/"embedding")) {
+      continue;
+    }
     auto& tar = datas_[key];
     if (std::holds_alternative<torch::Tensor>(value)) {
       tar.push_back(std::get<torch::Tensor>(value));
@@ -196,7 +239,7 @@ bool EncoderInputGatherVisitor::visit(MMDataItem& item) {
   return true;
 }
 
-bool EncoderInputGatherVisitor::finish(MMBatchData& mm_data) {
+void EncoderInputGatherVisitor::finish(MMBatchData& mm_data) {
   MMDict dict;
   for (auto& pair : datas_) {
     torch::Tensor tar;
@@ -207,7 +250,6 @@ bool EncoderInputGatherVisitor::finish(MMBatchData& mm_data) {
     }
   }
   mm_data.replace(std::move(dict));
-  return true;
 }
 
 bool EncoderOutputScatterVisitor::visit(MMDataItem& item) {
@@ -216,11 +258,11 @@ bool EncoderOutputScatterVisitor::visit(MMDataItem& item) {
   int32_t* idx = nullptr;
 
   if (item.type() == MMType::IMAGE) {
-    idx = &image_idx;
+    idx = &image_idx_;
   } else if (item.type() == MMType::VIDEO) {
-    idx = &video_idx;
+    idx = &video_idx_;
   } else if (item.type() == MMType::AUDIO) {
-    idx = &audio_idx;
+    idx = &audio_idx_;
   } else {
     LOG(FATAL) << " mm data item type invalid, type is " << item.type();
     return true;
@@ -248,11 +290,11 @@ bool EncoderOutputScatterVisitor::finish() const {
     std::string name = key.substr(0, key.find("|"));
     uint32_t idx = 0;
     if (name == "image") {
-      idx = image_idx;
+      idx = image_idx_;
     } else if (name == "video") {
-      idx = video_idx;
+      idx = video_idx_;
     } else if (name == "audio") {
-      idx = audio_idx;
+      idx = audio_idx_;
     } else {
       LOG(FATAL) << "invalid modality key: " << key;
     }
@@ -440,6 +482,28 @@ bool EncoderCacheInsertVisitor::visit(MMDataItem& item) {
   }
   cache_->insert(key, std::move(embedding.value()));
   return true;
+}
+
+void execute_mm_encoder(MMBatchData& mm_data,
+                        EncoderCache* cache,
+                        absl::FunctionRef<MMDict(MMBatchData&)> encode) {
+  if (cache != nullptr) {
+    EncoderCacheLookupVisitor lookup(cache);
+    mm_data.foreach (lookup);
+  }
+  EncoderInputGatherVisitor gather;
+  CHECK(mm_data.foreach (gather));
+  gather.finish(mm_data);
+
+  const auto encoded = encode(mm_data);
+  EncoderOutputScatterVisitor scatter(encoded);
+  mm_data.foreach (scatter);
+  CHECK(scatter.finish());
+
+  if (cache != nullptr) {
+    EncoderCacheInsertVisitor insert(cache);
+    mm_data.foreach (insert);
+  }
 }
 
 }  // namespace xllm

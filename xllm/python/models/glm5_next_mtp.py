@@ -209,6 +209,8 @@ class Glm5NextMtpModel(nn.Module):
 class Glm5NextMtpForCausalLM(Glm5NextForCausalLM):
     """GLM-5.3-Flash MTP draft calculator; scheduling stays in the C++ worker."""
 
+    runner_model_cls: type[nn.Module] | None = None
+
     def __init__(self, config: dict) -> None:
         self._mtp_start_layer_idx = int(config.get("mtp_start_layer_idx", -1))
         super().__init__(config, build_model=False)

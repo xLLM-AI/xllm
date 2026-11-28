@@ -74,7 +74,7 @@ from xllm.python.model_loader import (
     load_causal_lm_weights,
     load_gqa_fused_attention,
 )
-from xllm.python.models.base import MultimodalEmbeddings, PyModelBase
+from xllm.python.models.base import MultimodalEmbeddings, PyModelBase, TokenEmbeddingRunner
 
 
 def _queries(view_size: int, patch_size: int, downsample_ratio: int) -> int:
@@ -607,11 +607,9 @@ class DeepseekVisionModel(nn.Module):
         features = torch.cat((clip_out[:, 1:], sam_out.flatten(2).permute(0, 2, 1)), dim=-1)
         return self.projector(features)
 
-    def _grid_tokens(self, tokens: torch.Tensor, rows: int, cols: int, dim: int) -> torch.Tensor:
-        """Reshape a ``(R, C, dim)`` grid to ``R * (C + 1)`` rows, appending
-        an ``image_newline`` embedding at the end of every row (HF layout)."""
-        grid = tokens.reshape(rows, cols, dim)
-        grid = torch.cat([grid, self.image_newline[None, None, :].expand(rows, 1, dim)], dim=1)
+    def _grid_tokens(self, grid: torch.Tensor) -> torch.Tensor:
+        grid_height, _, dim = grid.shape
+        grid = torch.cat([grid, self.image_newline[None, None, :].expand(grid_height, 1, dim)], dim=1)
         return grid.reshape(-1, dim)
 
     def _crop_grid_tokens(
@@ -619,8 +617,6 @@ class DeepseekVisionModel(nn.Module):
         tokens: torch.Tensor,
         wc: int,
         hc: int,
-        q: int,
-        dim: int,
     ) -> torch.Tensor:
         """Crop grid with HF's row-interleaved reshape.
 
@@ -631,17 +627,16 @@ class DeepseekVisionModel(nn.Module):
         crop column — a simple ``view`` would keep whole crops contiguous
         and scramble the layout.
         """
+        _, q, _, dim = tokens.shape
         grid = tokens.reshape(hc, wc, q, q, dim)
         grid = grid.permute(0, 2, 1, 3, 4).reshape(hc * q, wc * q, dim)
-        return self._grid_tokens(grid, hc * q, wc * q, dim)
+        return self._grid_tokens(grid)
 
     def encode(
         self,
         pixel_values: torch.Tensor,
         pixel_values_crops: torch.Tensor | None,
         image_spatial_crop: torch.Tensor,
-        base_size: int,
-        crop_size: int,
     ) -> torch.Tensor:
         """All images of the batch in one pass.
 
@@ -656,29 +651,26 @@ class DeepseekVisionModel(nn.Module):
             ``(total_tokens, hidden)`` embeddings concatenated in image order.
         """
         pixel_values = pixel_values.to(dtype=self.dtype, device=self.device)
-        if pixel_values_crops is not None:
-            pixel_values_crops = pixel_values_crops.to(dtype=self.dtype, device=self.device)
-
         num_images = pixel_values.shape[0]
         global_tokens = self._refine(pixel_values)  # (N, q_base^2, hidden)
 
         crops_per_image = [0] * num_images
+        crop_tokens: torch.Tensor | None = None
         if pixel_values_crops is not None:
             for i in range(num_images):
                 wc = int(image_spatial_crop[i][0])
                 hc = int(image_spatial_crop[i][1])
                 crops_per_image[i] = wc * hc if (wc > 1 or hc > 1) else 0
-        num_crops = sum(crops_per_image)
-        crop_tokens: torch.Tensor | None = None
-        if num_crops > 0:
-            crop_tokens = self._refine(pixel_values_crops)  # (M, q^2, hidden)
+            if sum(crops_per_image) > 0:
+                q_crop = _queries(pixel_values_crops.shape[-1], 16, 4)
+                projected = self._refine(pixel_values_crops.to(dtype=self.dtype, device=self.device))
+                crop_tokens = projected.reshape(projected.shape[0], q_crop, q_crop, projected.shape[-1])
 
-        q_base = _queries(base_size, 16, 4)
-        q_crop = _queries(crop_size, 16, 4)
+        q_base = _queries(pixel_values.shape[-1], 16, 4)
         dim = global_tokens.shape[-1]
         # Batched global grids: every image contributes q_base * (q_base + 1)
         # rows (grid + trailing newline per row).
-        global_rows = self._grid_tokens(global_tokens, num_images * q_base, q_base, dim)
+        global_rows = self._grid_tokens(global_tokens.reshape(num_images * q_base, q_base, dim))
         sep_rows = self.view_seperator[None, :].expand(num_images, dim)
 
         parts: list[torch.Tensor] = []
@@ -690,9 +682,9 @@ class DeepseekVisionModel(nn.Module):
             if n_crops > 0:
                 wc = int(image_spatial_crop[i][0])
                 hc = int(image_spatial_crop[i][1])
-                rows = crop_tokens[crop_offset : crop_offset + n_crops]
+                image_crop_tokens = cast("torch.Tensor", crop_tokens)[crop_offset : crop_offset + n_crops]
                 crop_offset += n_crops
-                parts.append(self._crop_grid_tokens(rows, wc, hc, q_crop, dim))
+                parts.append(self._crop_grid_tokens(image_crop_tokens, wc, hc))
             parts.append(global_rows[i * q_base * (q_base + 1) : (i + 1) * q_base * (q_base + 1)])
             parts.append(sep_rows[i : i + 1])
         return torch.cat(parts, dim=0)
@@ -938,12 +930,9 @@ class DeepseekOCRModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        hidden: torch.Tensor,
         positions: torch.Tensor,
-        input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        hidden = self.embed_tokens(input_ids) if input_embedding is None else input_embedding
-
         positions = positions.to(torch.int64).contiguous()
         rope_cos, rope_sin = gather_half_rope_cos_sin(self.rotary.cos_sin_cache, positions)
         if self._use_fused_rope:
@@ -963,6 +952,8 @@ class DeepseekOCRForCausalLM(PyModelBase):
     """DeepSeek-OCR for the Python model executor (``--backend=vlm
     --model_impl=python``)."""
 
+    runner_model_cls: type[nn.Module] | None = TokenEmbeddingRunner
+
     def __init__(self, config: dict) -> None:
         super().__init__()
         self.cfg = DeepseekOCRConfig.from_dict(config)
@@ -970,8 +961,6 @@ class DeepseekOCRForCausalLM(PyModelBase):
         dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
         device = torch.device(config.get("device", "cuda"))
         self.image_token_id = cfg.image_token_id
-        self.base_size = cfg.mm_image_base_size
-        self.crop_size = cfg.mm_image_size
 
         self.vision_model = DeepseekVisionModel(cfg.hidden_size, dtype, device)
         self.model = DeepseekOCRModel(cfg, dtype=dtype, device=device)
@@ -995,8 +984,6 @@ class DeepseekOCRForCausalLM(PyModelBase):
             inputs["pixel_values"],
             inputs.get("pixel_values_crops"),
             inputs["image_spatial_crop"],
-            self.base_size,
-            self.crop_size,
         )
 
     def get_input_embeddings(
@@ -1034,28 +1021,6 @@ class DeepseekOCRForCausalLM(PyModelBase):
 # ---------------------------------------------------------------------------
 
 
-def _find_closest_aspect_ratio(
-    aspect_ratio: float,
-    target_ratios: list[tuple[int, int]],
-    width: int,
-    height: int,
-    image_size: int,
-) -> tuple[int, int]:
-    best_ratio_diff = float("inf")
-    best_ratio = (1, 1)
-    area = width * height
-    for ratio in target_ratios:
-        target_aspect_ratio = ratio[0] / ratio[1]
-        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
-        if ratio_diff < best_ratio_diff:
-            best_ratio_diff = ratio_diff
-            best_ratio = ratio
-        elif ratio_diff == best_ratio_diff:
-            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
-                best_ratio = ratio
-    return best_ratio
-
-
 def _dynamic_preprocess(
     image: Any,
     min_num: int = 2,
@@ -1076,7 +1041,16 @@ def _dynamic_preprocess(
         },
         key=lambda x: x[0] * x[1],
     )
-    best = _find_closest_aspect_ratio(aspect_ratio, target_ratios, orig_width, orig_height, image_size)
+    best = (1, 1)
+    best_ratio_diff = float("inf")
+    area = orig_width * orig_height
+    for ratio in target_ratios:
+        ratio_diff = abs(aspect_ratio - ratio[0] / ratio[1])
+        if ratio_diff < best_ratio_diff or (
+            ratio_diff == best_ratio_diff and area > 0.5 * image_size * image_size * ratio[0] * ratio[1]
+        ):
+            best_ratio_diff = ratio_diff
+            best = ratio
     target_width = image_size * best[0]
     target_height = image_size * best[1]
     resized_img = image.resize((target_width, target_height))

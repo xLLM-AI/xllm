@@ -34,7 +34,6 @@ import torch
 from xllm.python.models.deepseek_ocr import (
     DeepseekOCRConfig,
     DeepseekVisionModel,
-    _find_closest_aspect_ratio,
     _queries,
     preprocess_images,
 )
@@ -84,7 +83,7 @@ class TestTokenGridContract:
     def test_grid_formula_matches_encoder_rows_no_crops(self, vision_model: DeepseekVisionModel) -> None:
         pixel_values = torch.randn(2, 3, BASE_SIZE, BASE_SIZE)
         spatial = torch.tensor([[1, 1], [1, 1]])
-        embeds = vision_model.encode(pixel_values, None, spatial, BASE_SIZE, CROP_SIZE)
+        embeds = vision_model.encode(pixel_values, None, spatial)
         per_image = prompt_grid_tokens(BASE_SIZE, CROP_SIZE, 1, 1)
         assert embeds.shape == (2 * per_image, 1280)
 
@@ -93,7 +92,7 @@ class TestTokenGridContract:
         pixel_values = torch.randn(2, 3, BASE_SIZE, BASE_SIZE)
         crops = torch.randn(4, 3, CROP_SIZE, CROP_SIZE)
         spatial = torch.tensor([[2, 2], [1, 1]])
-        embeds = vision_model.encode(pixel_values, crops, spatial, BASE_SIZE, CROP_SIZE)
+        embeds = vision_model.encode(pixel_values, crops, spatial)
         expected = prompt_grid_tokens(BASE_SIZE, CROP_SIZE, 2, 2) + prompt_grid_tokens(BASE_SIZE, CROP_SIZE, 1, 1)
         assert embeds.shape == (expected, 1280)
 
@@ -120,7 +119,7 @@ class TestTokenGridContract:
         pixel_values = torch.zeros(1, 3, BASE_SIZE, BASE_SIZE)
         crops = torch.zeros(2 * 2, 3, CROP_SIZE, CROP_SIZE)
         spatial = torch.tensor([[2, 2]])
-        embeds = model.encode(pixel_values, crops, spatial, BASE_SIZE, CROP_SIZE)
+        embeds = model.encode(pixel_values, crops, spatial)
 
         n_crops_rows = (10 * 2 + 1) * (10 * 2)  # q_crop=10, 2x2 crop grid: 20 rows of 21
         n_global_rows = 16 * 17  # q_base=16: 16 rows of (16 tokens + 1 newline)
@@ -164,7 +163,7 @@ class TestCropGridInterleave:
         for tile in range(wc * hc):
             for crop_row in range(q):
                 tiles[tile, crop_row * q : (crop_row + 1) * q, 0] = (tile + 1) * 1000 + crop_row
-        grid = model._crop_grid_tokens(tiles, wc, hc, q, dim)
+        grid = model._crop_grid_tokens(tiles.reshape(wc * hc, q, q, dim), wc, hc)
         # Output row 0: crop row 0 of tile 0 (crop col 0) then tile 1 (col 1).
         assert grid[0, 0].item() == 1000
         assert grid[q, 0].item() == 2000  # tile 1, crop row 0
@@ -176,10 +175,6 @@ class TestCropGridInterleave:
 
 
 class TestDynamicPreprocess:
-    def test_aspect_ratio_selection(self) -> None:
-        assert _find_closest_aspect_ratio(1.0, [(1, 1), (1, 2), (2, 1)], 100, 100, 640) == (1, 1)
-        assert _find_closest_aspect_ratio(2.0, [(1, 1), (1, 2), (2, 1)], 640, 320, 640) == (2, 1)
-
     def test_small_image_not_tiled(self) -> None:
         img = torch.zeros(3, 400, 400, dtype=torch.uint8)
         item = preprocess_images([img], BASE_SIZE, CROP_SIZE)[0]

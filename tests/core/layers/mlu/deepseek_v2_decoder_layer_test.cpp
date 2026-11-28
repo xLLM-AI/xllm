@@ -802,7 +802,7 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
                             .device(options_.device())));
     }
 
-    return input_params.clone().to(options_.device()).view();
+    return input_params.to(options_.device()).view();
   }
 
   KVCache build_indexed_cache(torch::Tensor key_cache,
@@ -1386,7 +1386,7 @@ TEST_F(DeepseekV2DecoderLayerTest, ForwardMixedDpMoEReturnsLocalSlice) {
       torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
   input_params.parallel.dp_global_token_nums = {2, 1};
   input_params.parallel.dp_is_decode = {0, 0};
-  auto device_input_params = input_params.clone().to(options_.device()).view();
+  auto device_input_params = input_params.to(options_.device()).view();
 
   auto attn_metadata =
       AttentionMetadataBuilder::build(device_input_params, /*enable_mla=*/true);

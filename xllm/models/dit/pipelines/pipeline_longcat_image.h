@@ -91,6 +91,22 @@ inline std::pair<torch::Tensor, int64_t> retrieve_longcat_timesteps(
   return {scheduler_timesteps, steps};
 }
 
+inline LlmModelParams build_longcat_input_params(const torch::Tensor& tokens) {
+  LlmModelParams params;
+  const int64_t actual_seq_len = tokens.numel();
+  if (actual_seq_len > 0) {
+    params.meta.q_max_seq_len = actual_seq_len;
+    params.meta.kv_max_seq_len = actual_seq_len;
+    auto per_seq_lens =
+        torch::tensor({static_cast<int32_t>(actual_seq_len)}, /*options=*/torch::kInt)
+            .to(tokens.device());
+    params.attention.device.q_seq_lens = per_seq_lens;
+    params.attention.device.kv_seq_lens = per_seq_lens;
+    params.meta.batch_forward_type = BatchForwardType::PREFILL;
+  }
+  return params;
+}
+
 class LongCatImagePipelineImpl : public torch::nn::Module {
  public:
   LongCatImagePipelineImpl(const DiTModelContext& context) : context_(context) {
@@ -545,8 +561,10 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
     const auto& text_encoder_args = context_.get_model_args("text_encoder");
     std::vector<KVCache> kv_caches(text_encoder_args.n_layers());
 
-    VlmModelParams input_params =
-        build_longcat_input_params(tokens_flat, positions_2d, attention_mask);
+    LlmModelParams input_params = build_longcat_input_params(tokens_flat);
+    if (batch_size > 0) {
+      input_params.graph.attn_mask = mask_flat.to(/*dtype=*/torch::kFloat32);
+    }
     auto model_output = text_encoder_->forward(
         tokens_flat, positions_2d, kv_caches, ModelParamsView(input_params));
     torch::Tensor hidden_states_flat = model_output.hidden_states;
@@ -624,44 +642,6 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
   Qwen2_5_VLForConditionalGeneration text_encoder_{nullptr};
   std::string prompt_template_encode_prefix_;
   std::string prompt_template_encode_suffix_;
-
-  // Build VlmModelParams for LongCat-Image text encoding
-  VlmModelParams build_longcat_input_params(
-      const torch::Tensor& tokens,
-      const torch::Tensor& positions,
-      const torch::Tensor& attention_mask) {
-    VlmModelParams params;
-
-    int64_t actual_seq_len;
-    if (positions.dim() == 2) {
-      actual_seq_len = positions.size(1);
-    } else if (positions.dim() == 1) {
-      actual_seq_len = positions.size(0);
-    } else {
-      actual_seq_len = positions.numel();
-    }
-
-    if (actual_seq_len > 0) {
-      params.meta.q_max_seq_len = actual_seq_len;
-      params.meta.kv_max_seq_len = actual_seq_len;
-      auto per_seq_lens =
-          torch::tensor({static_cast<int32_t>(actual_seq_len)}, torch::kInt)
-              .to(tokens.device());
-      params.attention.device.q_seq_lens = per_seq_lens;
-      params.attention.device.kv_seq_lens = per_seq_lens;
-      params.meta.batch_forward_type = BatchForwardType::PREFILL;
-    }
-
-    // Let Qwen2_5_VL build multimodal-aware embeddings from tokens and params.
-    params.embedding.input_embedding =
-        text_encoder_->get_input_embeddings(tokens, ModelParamsView(params));
-
-    if (attention_mask.defined() && attention_mask.size(0) > 0) {
-      params.graph.attn_mask = attention_mask.view({-1}).to(torch::kFloat32);
-    }
-
-    return params;
-  }
 
   std::vector<torch::Tensor> forward_(
       std::optional<std::vector<std::string>> prompt = std::nullopt,

@@ -23,7 +23,6 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/causal_vlm.h"
-#include "framework/model/model_params_view.h"
 #include "models/model_registry.h"
 #include "options.h"
 #include "util/timer.h"
@@ -49,22 +48,16 @@ bool MMEmbedVLMWorkerImpl::init_model(ModelContext& context) {
 std::optional<ForwardOutput> MMEmbedVLMWorkerImpl::step(
     const VlmForwardInput& input) {
   torch::DeviceGuard device_guard(device_);
-  auto ret = device_.synchronize_default_stream();
+  device_.synchronize_default_stream();
 
   Timer timer;
 
-  // TODO remove language params in only vision model forward.
-  // TODO to adapt multi stream parallel later, just use [0] temporarily
-  // all tensors should be on the same device as model
-  auto params = input.input_params.to(device_);
   CHECK(input.sampling_params.is_embeddings())
       << "Only mm embedding is supported.";
 
-  // call model executor forward to get hidden states
-  CausalVLM* vlm_model = dynamic_cast<CausalVLM*>(model_.get());
-  CHECK(vlm_model != nullptr) << "Model is not a CausalVLM.";
-  ModelParamsView execution_params(params);
-  auto encode_output = vlm_model->encode(execution_params);
+  auto* vlm_model = static_cast<CausalVLM*>(model_.get());
+  auto encode_output =
+      vlm_model->encode(MMBatchData::to(input.mm_data_, device_));
   const auto it = encode_output.find("image|embedding");
   if (it == encode_output.end() ||
       !std::holds_alternative<std::vector<torch::Tensor>>(it->second)) {
@@ -73,7 +66,7 @@ std::optional<ForwardOutput> MMEmbedVLMWorkerImpl::step(
   }
   const auto& mm_embeddings = std::get<std::vector<torch::Tensor>>(it->second);
 
-  ret = device_.synchronize_default_stream();
+  device_.synchronize_default_stream();
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 
   if (!driver_) {
@@ -86,7 +79,7 @@ std::optional<ForwardOutput> MMEmbedVLMWorkerImpl::step(
   SampleOutput sample_output;
   // Group the flattened per-image embeddings by sequence, using each sequence's
   // image count from the host-side mm_data. Outer = sequence, inner = images.
-  const auto& mm_data_vec = input.input_params.multimodal.mm_data.mm_data_vec();
+  const auto& mm_data_vec = input.mm_data_.mm_data_vec();
   sample_output.mm_embeddings.reserve(mm_data_vec.size());
   size_t image_idx = 0;
   for (const auto& seq_mm_data : mm_data_vec) {

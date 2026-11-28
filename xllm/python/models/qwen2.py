@@ -228,12 +228,9 @@ class Qwen2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        hidden: torch.Tensor,
         positions: torch.Tensor,
-        input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        hidden = self.embed_tokens(input_ids) if input_embedding is None else input_embedding
-
         positions = positions.to(torch.int64).contiguous()
         rope_cos, rope_sin = gather_half_rope_cos_sin(self.rotary.cos_sin_cache, positions)
         if self._use_fused_rope:

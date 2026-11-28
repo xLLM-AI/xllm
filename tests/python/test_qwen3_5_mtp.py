@@ -163,12 +163,13 @@ def test_mtp_matches_native_fusion_and_returns_post_norm_recurrent_hidden(
     )
     projected = torch.nn.functional.linear(fused, checkpoint["fc.weight"])
     expected = reference_norm(projected * (1 + checkpoint["layers.0.weight"]), "norm.weight")
-    actual = model.model(ids, positions, recurrent)
+    runner = model.runner_model
+    actual = runner(ids, positions, recurrent)
     torch.testing.assert_close(actual, expected)
     assert actual[0].abs().sum() > 0  # Qwen does not apply GLM's position-zero masking.
     torch.testing.assert_close(model.compute_logits(actual, torch.tensor([2, 0])), model.lm_head(expected[[2, 0]]))
     with pytest.raises(ValueError, match="one carried hidden state"):
-        model.model(ids, positions, recurrent[:1])
+        runner(ids, positions, recurrent[:1])
 
 
 @pytest.mark.parametrize("prefix", ["", "model."])
@@ -179,6 +180,6 @@ def test_mtp_rejects_unscoped_draft_checkpoint_roots(model: qwen3_5_mtp.Qwen3_5M
 
 def test_mtp_owns_usable_embedding_and_vocabulary_endpoints(model: qwen3_5_mtp.Qwen3_5MtpForCausalLM) -> None:
     model.load_weights([StateDict(_weights(_checkpoint()))], 0, 1)
-    hidden = model.model(torch.tensor([1]), torch.tensor([0]), torch.ones(1, 4))
+    hidden = model.runner_model(torch.tensor([1]), torch.tensor([0]))
     assert hidden.shape == (1, 4)
     assert model.compute_logits(hidden, None).shape == (1, 8)

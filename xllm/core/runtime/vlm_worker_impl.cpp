@@ -142,7 +142,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
   {
     ModelParamsView params(input.input_params);
     model_output = model_executor_->forward(
-        input.token_ids, input.positions, kv_caches_, params);
+        input.token_ids, input.positions, kv_caches_, params, input.mm_data_);
     if (sampling_params.num_sample_seqs() > 0) {
       lm_head_input_indices =
           remap_logits_indices(sampling_params.logits_indices(),

@@ -67,15 +67,16 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
                       std::vector<KVCache>& kv_caches,
                       const ModelParamsView& parameters) override;
 
-  MMDict encode(const ModelParamsView& parameters) override {
+  MMDict encode(const MMBatchData& /*mm_data*/) override {
     LOG(FATAL) << "PyCausalLM::encode must not be called directly; "
                << "PyExecutorImpl drives the Python model's encode via pybind.";
     return MMDict{};
   }
 
   torch::Tensor get_input_embeddings(
-      const torch::Tensor& input_ids,
-      const ModelParamsView& input_params) override {
+      const torch::Tensor& /*input_ids*/,
+      const MMBatchData& /*mm_data*/,
+      std::vector<torch::Tensor>& /*deep_stacks*/) override {
     LOG(FATAL) << "PyCausalLM::get_input_embeddings must not be called "
                << "directly; PyExecutorImpl drives it via pybind.";
     return torch::Tensor();

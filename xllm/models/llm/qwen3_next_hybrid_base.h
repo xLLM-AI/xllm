@@ -49,10 +49,14 @@ namespace xllm {
 
 class Qwen3HybridModelModule : public torch::nn::Module {
  public:
-  virtual ModelOutput forward(torch::Tensor tokens,
-                              torch::Tensor positions,
-                              std::vector<KVCache>& kv_caches,
-                              const ModelParamsView& input_params) = 0;
+  virtual torch::Tensor prepare_inputs_embeds(
+      const torch::Tensor& tokens,
+      const torch::Tensor& input_embedding) = 0;
+  virtual ModelOutput forward_from_embeddings(
+      torch::Tensor h,
+      torch::Tensor positions,
+      std::vector<KVCache>& kv_caches,
+      const ModelParamsView& input_params) = 0;
   virtual void load_state_dict(const StateDict& state_dict) = 0;
   virtual void verify_loaded_weights(const std::string& prefix) const = 0;
   virtual layer::WordEmbedding get_word_embedding() = 0;
@@ -77,7 +81,6 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     }
 
     auto options = context.get_tensor_options();
-    auto parallel_args = context.get_parallel_args();
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
     layers_.reserve(model_args_.n_layers());
@@ -95,24 +98,19 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     dense_attn_mask_ = layer::AttentionMask(options.device(),
                                             options.dtype().toScalarType(),
                                             /*mask_value=*/1);
-    dp_size_ = parallel_args.dp_size();
   }
 
-  // tokens: [num_tokens]
-  // positions: [num_tokens] token pos in the sequence
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) override {
-    // Disable gradient computation to reduce memory usage during inference
-    torch::NoGradGuard no_grad;
-    if (dp_size_ > 1) {
-      if (tokens.sizes() == 0) {
-        tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
-        positions = torch::tensor({0}).to(torch::kInt32).to(device_);
-      }
-    }
+  torch::Tensor prepare_inputs_embeds(
+      const torch::Tensor& tokens,
+      const torch::Tensor& input_embedding) override {
+    return input_embedding.defined() ? input_embedding : embed_tokens_(tokens);
+  }
 
+  ModelOutput forward_from_embeddings(
+      torch::Tensor h,
+      torch::Tensor positions,
+      std::vector<KVCache>& kv_caches,
+      const ModelParamsView& input_params) override {
     layer::AttentionMetadataBuildOptions metadata_build_options;
 #if defined(USE_NPU)
     // Native NPU GDN consumes the canonical host mask directly. Avoid
@@ -154,7 +152,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
             /*device=*/device_,
             metadata_build_options);
 #endif
-    const int32_t num_tokens = static_cast<int32_t>(tokens.size(0));
+    const int32_t num_tokens = static_cast<int32_t>(h.size(/*dim=*/0));
     const auto& batch_forward_type = input_params.meta.batch_forward_type;
     const bool is_prefill_side =
         batch_forward_type.no_decode() ||
@@ -168,13 +166,6 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
           num_tokens, is_prefill_side, parallel_args_, flash_comm1_options_);
     }
     FlashComm1ContextScope fc1_scope(&fc1_ctx);
-
-    torch::Tensor h;
-    if (input_params.embedding.input_embedding.defined()) {
-      h = input_params.embedding.input_embedding;
-    } else {
-      h = embed_tokens_(tokens);
-    }
 
     if (is_sequence_sharded(fc1_ctx)) {
       h = shard_sequence(h, fc1_ctx);
@@ -296,7 +287,6 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
   torch::nn::ModuleList blocks_{nullptr};
   std::vector<layer::Qwen3HybridDecoderLayerModulePtr> layers_;
   int32_t max_seq_len_ = 0;
-  int32_t dp_size_ = 1;
   ParallelArgs parallel_args_;
   FlashComm1Options flash_comm1_options_;
   torch::Device device_;
@@ -313,7 +303,25 @@ class Qwen3HybridForCausalLMImplBase
  public:
   Qwen3HybridForCausalLMImplBase(const ModelContext& context,
                                  Qwen3HybridModelModulePtr model)
-      : LlmForCausalLMImplBase(context, std::move(model)) {}
+      : LlmForCausalLMImplBase(context, std::move(model)),
+        device_(context.get_tensor_options().device()),
+        dp_enabled_(context.get_parallel_args().dp_size() > 1) {}
+
+  ModelOutput forward(const torch::Tensor& tokens,
+                      const torch::Tensor& positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelParamsView& input_params) override {
+    torch::NoGradGuard no_grad;
+    auto model_tokens = tokens;
+    auto model_positions = positions;
+    prepare_empty_dp_shard(model_tokens, model_positions);
+    return model_->forward_from_embeddings(
+        model_->prepare_inputs_embeds(model_tokens,
+                                      input_params.embedding.input_embedding),
+        std::move(model_positions),
+        kv_caches,
+        input_params);
+  }
 
   // hidden_states: [num_tokens, hidden_size]
   // seleted_idxes: [num_tokens]
@@ -366,6 +374,19 @@ class Qwen3HybridForCausalLMImplBase
   }
 
   bool is_hybrid_linear_attention() { return true; }
+
+ protected:
+  void prepare_empty_dp_shard(torch::Tensor& tokens,
+                              torch::Tensor& positions) const {
+    if (dp_enabled_ && tokens.numel() == 0) {
+      tokens = torch::tensor(/*values=*/{1}, /*options=*/torch::kInt32).to(device_);
+      positions = torch::tensor(/*values=*/{0}, /*options=*/torch::kInt32).to(device_);
+    }
+  }
+
+ private:
+  const torch::Device device_;
+  const bool dp_enabled_;
 };
 
 }  // namespace xllm

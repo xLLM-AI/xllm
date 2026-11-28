@@ -110,17 +110,21 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
     }
   }
 
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) override {
-    torch::NoGradGuard no_grad;
+  torch::Tensor prepare_inputs_embeds(
+      const torch::Tensor& tokens,
+      const torch::Tensor& input_embedding) override {
+    auto embedding = embed_tokens_(tokens);
+    auto hidden = input_embedding.defined() ? input_embedding : embedding;
+    embedding = std::get<0>(pre_fc_norm_embedding_->forward(embedding));
+    hidden = std::get<0>(pre_fc_norm_hidden_->forward(hidden));
+    return fc_(torch::cat({embedding, hidden}, /*dim=*/-1));
+  }
 
-    if (dp_size_ > 1 && tokens.sizes() == 0) {
-      tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
-      positions = torch::tensor({0}).to(torch::kInt32).to(device_);
-    }
-
+  ModelOutput forward_from_embeddings(
+      torch::Tensor mtp_hidden,
+      torch::Tensor positions,
+      std::vector<KVCache>& kv_caches,
+      const ModelParamsView& input_params) override {
     layer::AttentionMetadataBuildOptions metadata_build_options;
 #if defined(USE_NPU)
     // Native NPU GDN consumes the canonical host mask directly. Avoid
@@ -137,16 +141,6 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
             metadata_build_options);
     prepare_mrope(positions, attn_metadata);
 
-    torch::Tensor embedding = embed_tokens_(tokens);
-    torch::Tensor hidden = input_params.embedding.input_embedding;
-    if (hidden.defined() == false) {
-      hidden = embedding;
-    }
-
-    embedding = std::get<0>(pre_fc_norm_embedding_->forward(embedding));
-    hidden = std::get<0>(pre_fc_norm_hidden_->forward(hidden));
-    torch::Tensor mtp_hidden = fc_(torch::cat({embedding, hidden}, -1));
-
     CHECK_EQ(kv_caches.size(), layers_.size());
     torch::Tensor mrope_cos_sin;
     for (const layer::Qwen3HybridDecoderLayerModulePtr& layer : layers_) {
@@ -157,7 +151,7 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
     }
 
     std::optional<torch::Tensor> residual = std::nullopt;
-    if (!input_params.synchronize_draft_layer()) {
+    if (!input_params.parallel.synchronize_draft_layer()) {
       return ModelOutput();
     }
     for (size_t i = 0; i < layers_.size(); ++i) {

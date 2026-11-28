@@ -21,6 +21,7 @@ limitations under the License.
 #include <vector>
 
 #include "causal_lm.h"
+#include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/quantization/quant_args.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/kv_cache/storage/kv_cache.h"
@@ -32,10 +33,11 @@ namespace xllm {
 class CausalVLM : public CausalLM {
  public:
   ~CausalVLM() override = default;
-  virtual MMDict encode(const ModelParamsView& parameters) = 0;
+  virtual MMDict encode(const MMBatchData& mm_data) = 0;
   virtual torch::Tensor get_input_embeddings(
       const torch::Tensor& input_ids,
-      const ModelParamsView& input_params) = 0;
+      const MMBatchData& mm_data,
+      std::vector<torch::Tensor>& deep_stacks) = 0;
 };
 
 template <typename ModelType>
@@ -44,14 +46,22 @@ class CausalVLMImpl : public CausalVLM {
   CausalVLMImpl(ModelType model, const torch::TensorOptions& options)
       : model_(std::move(model)), options_(options) {}
 
-  MMDict encode(const ModelParamsView& parameters) override {
-    return model_->get_multimodal_embeddings(parameters);
+  MMDict encode(const MMBatchData& mm_data) override {
+    return model_->get_multimodal_embeddings(mm_data);
   }
 
   torch::Tensor get_input_embeddings(
       const torch::Tensor& input_ids,
-      const ModelParamsView& input_params) override {
-    return model_->get_input_embeddings(input_ids, input_params);
+      const MMBatchData& mm_data,
+      std::vector<torch::Tensor>& deep_stacks) override {
+    if constexpr (requires {
+                    model_->get_input_embeddings(
+                        input_ids, mm_data, deep_stacks);
+                  }) {
+      return model_->get_input_embeddings(input_ids, mm_data, deep_stacks);
+    } else {
+      return model_->get_input_embeddings(input_ids, mm_data);
+    }
   }
 
   ModelOutput forward(const torch::Tensor& tokens,

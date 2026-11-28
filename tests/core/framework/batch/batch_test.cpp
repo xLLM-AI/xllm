@@ -1140,7 +1140,7 @@ TEST(BatchTest, NativeVlmPrefillSchedulesOnlyVisibleVisionItems) {
   EXPECT_EQ(input.input_params.meta.num_sequences, 1);
   EXPECT_TRUE(equal(input.token_ids, std::vector<int32_t>{10, 11, 12}));
   EXPECT_TRUE(equal(input.positions, std::vector<int32_t>{0, 1, 2}));
-  const MMBatchData& vision = input.input_params.multimodal.mm_data;
+  const MMBatchData& vision = input.mm_data_;
   ASSERT_TRUE(vision.valid());
   ASSERT_EQ(vision.mm_data_vec().size(), 1u);
   const MMData& scheduled_data = vision.mm_data_vec().front();
@@ -1177,8 +1177,7 @@ TEST(BatchTest, NativeVlmDecodeKeepsDomainWithoutVisionPayload) {
   EXPECT_EQ(input.input_params.meta.num_sequences, 1);
   EXPECT_TRUE(equal(input.token_ids, std::vector<int32_t>{13}));
   EXPECT_TRUE(equal(input.positions, std::vector<int32_t>{3}));
-  EXPECT_FALSE(input.input_params.multimodal.mm_data.valid());
-  EXPECT_TRUE(input.input_params.multimodal.mm_data.mm_data_vec().empty());
+  EXPECT_FALSE(input.mm_data_.valid());
   EXPECT_TRUE(sequence.mm_data().valid());
 }
 

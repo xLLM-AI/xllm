@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <absl/functional/function_ref.h>
 #include <torch/types.h>
 
 #include <cstddef>
@@ -98,32 +99,6 @@ class MMTokenNumVisitor final : public MMDataItem::IVisitor {
   std::vector<int32_t> token_nums_;
 };
 
-class EncoderInputGatherVisitor : public MMDataItem::IVisitor {
- public:
-  EncoderInputGatherVisitor() = default;
-
-  bool visit(MMDataItem& item) override;
-  bool finish(MMBatchData& mm_data);
-
- public:
-  std::unordered_map<MMKey, std::vector<torch::Tensor>> datas_;
-  std::string filter_prefix_ = "embedding";
-};
-
-class EncoderOutputScatterVisitor : public MMDataItem::IVisitor {
- public:
-  EncoderOutputScatterVisitor(const MMDict& data) : data_(data) {}
-
-  bool visit(MMDataItem& data) override;
-  bool finish() const;
-
- public:
-  const MMDict& data_;
-  int32_t image_idx = 0;
-  int32_t video_idx = 0;
-  int32_t audio_idx = 0;
-};
-
 class EncoderEmbeddingGatherVisitor : public MMDataItem::IVisitor {
  public:
   EncoderEmbeddingGatherVisitor(const torch::Device& device,
@@ -135,7 +110,6 @@ class EncoderEmbeddingGatherVisitor : public MMDataItem::IVisitor {
 
  public:
   torch::Device device_;
-  std::string gather_prefix_ = "embedding";
   std::vector<int32_t> per_seq_context_lens_;
   std::vector<int32_t> per_seq_scheduled_lens_;
   std::vector<int32_t> per_seq_scheduled_offsets_;
@@ -166,22 +140,9 @@ class UpdateMMItemScheduleStateVisitor : public MMDataItem::IVisitor {
 };
 
 class EncoderCache;
-class EncoderCacheLookupVisitor : public MMDataItem::IVisitor {
- public:
-  explicit EncoderCacheLookupVisitor(EncoderCache* cache);
-  bool visit(MMDataItem& item) override;
 
- private:
-  EncoderCache* cache_;
-};
-
-class EncoderCacheInsertVisitor : public MMDataItem::IVisitor {
- public:
-  explicit EncoderCacheInsertVisitor(EncoderCache* cache);
-  bool visit(MMDataItem& item) override;
-
- private:
-  EncoderCache* cache_;
-};
+void execute_mm_encoder(MMBatchData& mm_data,
+                        EncoderCache* cache,
+                        absl::FunctionRef<MMDict(MMBatchData&)> encode);
 
 }  // namespace xllm

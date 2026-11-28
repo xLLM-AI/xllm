@@ -744,7 +744,7 @@ class DeepseekV4ModelImpl
   ModelOutput forward(torch::Tensor tokens,
                       torch::Tensor positions,
                       std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) override {
+                      const ModelParamsView& input_params) {
     torch::NoGradGuard no_grad;
     const bool acl_graph_forward = deepseek_v4_uses_acl_graph(input_params);
     const bool is_graph_empty_dp_rank =

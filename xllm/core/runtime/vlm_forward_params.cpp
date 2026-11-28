@@ -19,6 +19,21 @@ limitations under the License.
 
 namespace xllm {
 
+VlmForwardInput VlmForwardInput::clone() const {
+  VlmForwardInput inputs;
+  inputs.runtime = runtime;
+  copy_non_runtime_metadata_to(inputs);
+  inputs.token_ids = token_ids;
+  inputs.positions = positions;
+  inputs.token_ids_host = token_ids_host;
+  inputs.positions_host = positions_host;
+  inputs.input_params = input_params.clone();
+  inputs.mm_data_ = mm_data_;
+  inputs.sampling_params = sampling_params;
+  inputs.json_object_errors = json_object_errors;
+  return inputs;
+}
+
 VlmForwardInput VlmForwardInput::to(const torch::Device& device,
                                     torch::ScalarType dtype) const {
   if (runtime.device_tensors_ready) {
@@ -59,6 +74,7 @@ VlmForwardInput VlmForwardInput::to(const torch::Device& device,
   inputs.positions = detail::normalize_positions_for_device(
       safe_to(source_positions, device, /*non_blocking=*/true));
   inputs.input_params = input_params.to(device);
+  inputs.mm_data_ = MMBatchData::to(mm_data_, device);
   inputs.sampling_params = sampling_params.to(device, dtype);
   copy_metadata_to(inputs);
   inputs.runtime.input_host_buffer = runtime.input_host_buffer;
@@ -77,8 +93,7 @@ bool VlmForwardInput::to_contiguous_input_buffer(
   const VlmModelParams& source_params = input_params;
   if ((token_ids.defined() && !inputs.token_ids_host.defined()) ||
       (positions.defined() && !inputs.positions_host.defined()) ||
-      source_params.multimodal.mm_data.valid() ||
-      !source_params.multimodal.deep_stacks.empty()) {
+      mm_data_.valid() || !source_params.embedding.deep_stacks_.empty()) {
     return false;
   }
 
@@ -113,6 +128,71 @@ bool VlmForwardInput::to_contiguous_input_buffer(
   inputs.runtime.device_tensors_ready = true;
   inputs.runtime.input_host_buffer_has_layout = false;
   return true;
+}
+
+LlmForwardInput make_llm_draft_input(const VlmForwardInput& target,
+                                     bool shared_full_cache) {
+  CHECK(!target.runtime.input_host_buffer_has_layout ||
+        target.runtime.device_tensors_ready)
+      << "Cannot create an LLM draft input from an unmaterialized packed VLM "
+         "input.";
+  LlmForwardInput draft;
+  draft.token_ids = target.token_ids;
+  draft.positions = target.positions;
+  draft.token_ids_host = target.token_ids_host;
+  draft.positions_host = target.positions_host;
+  auto& params = draft.input_params;
+  const auto& source = target.input_params;
+  params.meta = source.meta;
+  detail::copy_attention_host_input(source.attention.host,
+                                    params.attention.host);
+  detail::copy_attention_device_input(source.attention.device,
+                                      params.attention.device);
+  if (!shared_full_cache) {
+    params.attention.host.shared_full_block_table = torch::Tensor();
+    params.attention.host.shared_full_slot_mapping = torch::Tensor();
+    params.attention.device.shared_full_block_table = torch::Tensor();
+    params.attention.device.shared_full_slot_mapping = torch::Tensor();
+  }
+  params.attention.attention_host_buffer =
+      source.attention.attention_host_buffer;
+  params.attention.attention_device_buffer =
+      source.attention.attention_device_buffer;
+  params.attention.attention_buffer_bytes =
+      source.attention.attention_buffer_bytes;
+  params.attention.attention_buffer_capacity =
+      source.attention.attention_buffer_capacity;
+  params.attention.attention_buffer_owner =
+      source.attention.attention_buffer_owner;
+  params.embedding.input_embedding = source.embedding.input_embedding;
+  params.embedding.embedding_ids = source.embedding.embedding_ids;
+  params.embedding.request_ids = source.embedding.request_ids;
+  params.embedding.extra_token_ids = source.embedding.extra_token_ids;
+  params.embedding.mtp_bootstrap_row_idxes =
+      source.embedding.mtp_bootstrap_row_idxes;
+  params.embedding.mtp_bootstrap_embeddings =
+      source.embedding.mtp_bootstrap_embeddings;
+  params.parallel = source.parallel;
+  params.expert = source.expert;
+  params.graph = source.graph;
+  params.multi_block_tables = source.multi_block_tables;
+  params.prefill_without_cache = source.prefill_without_cache;
+  params.num_accepted_tokens = source.num_accepted_tokens;
+  params.mtp_topk_state = source.mtp_topk_state;
+  params.num_accepted_tokens_host = source.num_accepted_tokens_host;
+  params.attn_metadata = source.attn_metadata;
+  params.enable_graph = source.enable_graph;
+  draft.sampling_params = target.sampling_params;
+  draft.sample_sequence_ids = target.sample_sequence_ids;
+  draft.sample_prior_output_rows = target.sample_prior_output_rows;
+  draft.json_object_states = target.json_object_states;
+  draft.json_object_state_snapshots = target.json_object_state_snapshots;
+  draft.skip_sampling_for_logits_only = target.skip_sampling_for_logits_only;
+  draft.return_selected_hidden = target.return_selected_hidden;
+  draft.transfer_kv_infos = target.transfer_kv_infos;
+  draft.runtime = target.runtime;
+  draft.runtime.input_host_buffer_has_layout = false;
+  return draft;
 }
 
 }  // namespace xllm

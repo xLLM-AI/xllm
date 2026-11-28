@@ -78,7 +78,7 @@ class Glm5NextModelImpl final
   ModelOutput forward(torch::Tensor tokens,
                       torch::Tensor positions,
                       std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) override {
+                      const ModelParamsView& input_params) {
     torch::NoGradGuard no_grad;
     CHECK_EQ(kv_caches.size(), layers_.size())
         << "GLM5-Next requires one layer-specific cache object per layer.";

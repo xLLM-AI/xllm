@@ -86,23 +86,12 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
     return std::make_pair(cos_pos, sin_pos);
   }
 
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) override {
-    auto local_params = input_params.clone().view();
-    if (tokens.numel() == 0) {
-      tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-      positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-    }
-    auto inputs_embeds = local_params.embedding.input_embedding;
-    torch::Tensor h;
-    if (inputs_embeds.defined()) {
-      h = inputs_embeds;
-    } else {
-      h = embed_tokens_(tokens);
-    }
-
+  ModelOutput forward_from_embeddings(
+      torch::Tensor h,
+      torch::Tensor positions,
+      std::vector<KVCache>& kv_caches,
+      const ModelParamsView& input_params) override {
+    const auto local_params = input_params.clone().view();
     auto& dp_token_nums = local_params.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
     if (!local_params.attn_metadata) {
@@ -119,6 +108,8 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
           apply_mrope(positions);
     }
 
+    const auto& deep_stacks = local_params.embedding.deep_stacks_;
+    const size_t num_deep_stacks = deep_stacks.size();
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
       if (!local_params.synchronize_layer(static_cast<uint32_t>(i))) {
@@ -133,11 +124,8 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
         return ModelOutput();
       }
 
-      if (local_params.has_multimodal()) {
-        const auto& deep_stacks = local_params.multimodal().deep_stacks;
-        if (i < deep_stacks.size()) {
-          h = h + deep_stacks[i];
-        }
+      if (i < num_deep_stacks) {
+        h = h + deep_stacks[i];
       }
     }
     auto [hidden_states, residual_out] = norm_(h, residual);

@@ -71,6 +71,18 @@ bool MMBatchData::has(const MMKey& key) const {
   return itor != dict.end();
 }
 
+void MMBatchData::merge_visual_embeddings(torch::Tensor& inputs_embeds) const {
+  const auto merge = [&](const MMKey& embedding_key, const MMKey& mask_key) {
+    if (const auto embedding = get<torch::Tensor>(embedding_key)) {
+      if (const auto mask = get<torch::Tensor>(mask_key)) {
+        inputs_embeds.index_put_({*mask}, *embedding);
+      }
+    }
+  };
+  merge(/*embedding_key=*/"image|embedding", /*mask_key=*/"image|mask");
+  merge(/*embedding_key=*/"video|embedding", /*mask_key=*/"video|mask");
+}
+
 void MMBatchData::get(const MMKey& key, std::vector<torch::Tensor>& vec) const {
   if (!valid()) return;
 

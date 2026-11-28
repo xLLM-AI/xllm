@@ -264,10 +264,10 @@ TEST(DecodeInputBuilderTest, VlmVerifyRowsPreserveVisionState) {
       torch::tensor({{0, 1, 2}, {3, 4, 5}}, torch::kInt);
   input.input_params.attention.host.kv_seq_lens = {5, 9};
   const torch::Tensor pixels = torch::tensor({{1.0f, 2.0f}});
-  input.input_params.multimodal.mm_data.batch(
+  input.mm_data_.batch(
       {MMData(MMType::IMAGE, MMDict{{"pixel_values", pixels}})});
   const torch::Tensor deep_stack = torch::tensor({{3.0f, 4.0f}});
-  input.input_params.multimodal.deep_stacks = {deep_stack};
+  input.input_params.embedding.deep_stacks_ = {deep_stack};
 
   const DecodeBatchContext ctx = make_decode_batch_context(input);
   DecodeExpansionOptions decode_options;
@@ -278,11 +278,11 @@ TEST(DecodeInputBuilderTest, VlmVerifyRowsPreserveVisionState) {
   EXPECT_EQ(input.input_params.attention.host.q_seq_lens,
             std::vector<int32_t>({1, 1}));
   const auto retained_pixels =
-      input.input_params.multimodal.mm_data.get<torch::Tensor>("pixel_values");
+      input.mm_data_.get<torch::Tensor>(/*key=*/"pixel_values");
   ASSERT_TRUE(retained_pixels.has_value());
   EXPECT_TRUE(torch::equal(*retained_pixels, pixels));
-  ASSERT_EQ(input.input_params.multimodal.deep_stacks.size(), 1u);
-  EXPECT_EQ(input.input_params.multimodal.deep_stacks.front().data_ptr(),
+  ASSERT_EQ(input.input_params.embedding.deep_stacks_.size(), 1u);
+  EXPECT_EQ(input.input_params.embedding.deep_stacks_.front().data_ptr(),
             deep_stack.data_ptr());
 }
 

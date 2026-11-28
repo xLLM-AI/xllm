@@ -19,7 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 
-#include "core/framework/model/model_params_view.h"
+#include "core/framework/model/model_input_types.h"
 #include "core/framework/speculative/rejection_sampler.h"
 #include "core/util/utils.h"
 
@@ -65,7 +65,7 @@ int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
 
 torch::Tensor materialize_graph_speculative_verify_tokens(
     const torch::Tensor& tokens,
-    const GraphInputView& graph_input) {
+    const ModelGraphInput& graph_input) {
   const torch::Tensor& verify_tokens =
       graph_input.input_tokens_override.defined()
           ? graph_input.input_tokens_override

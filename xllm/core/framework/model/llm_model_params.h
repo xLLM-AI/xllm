@@ -15,8 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <utility>
-
 #include "core/framework/model/domain_attention_input.h"
 #include "core/util/tensor_helper.h"
 
@@ -25,54 +23,14 @@ namespace xllm {
 class LlmModelParams final {
  public:
   LlmModelParams() = default;
-  LlmModelParams(const LlmModelParams&) = delete;
   LlmModelParams& operator=(const LlmModelParams&) = delete;
   LlmModelParams(LlmModelParams&&) = default;
   LlmModelParams& operator=(LlmModelParams&&) = default;
 
-  LlmModelParams clone() const {
-    LlmModelParams out;
-    out.meta = meta;
-    out.attention = attention;
-    out.embedding = embedding;
-    out.parallel = parallel;
-    out.expert = expert;
-    out.graph = graph;
-    out.multi_block_tables = multi_block_tables;
-    out.linear_state_validity_mask = linear_state_validity_mask;
-    out.prefill_without_cache = prefill_without_cache;
-    out.num_accepted_tokens = num_accepted_tokens;
-    out.mtp_topk_state = mtp_topk_state;
-    out.num_accepted_tokens_host = num_accepted_tokens_host;
-    out.attn_metadata = attn_metadata;
-    out.enable_graph = enable_graph;
-    return out;
-  }
+  LlmModelParams clone() const { return LlmModelParams(*this); }
 
   LlmModelParams to(const torch::Device& device) const {
-    LlmModelParams params;
-    params.meta = meta;
-    params.attention = attention.to(device);
-    params.embedding = embedding.to(device);
-    params.parallel = parallel.to(device);
-    params.expert = expert.to(device);
-    params.graph = graph.to(device);
-    params.linear_state_validity_mask = linear_state_validity_mask;
-    params.prefill_without_cache = prefill_without_cache;
-    params.num_accepted_tokens = safe_to(num_accepted_tokens, device, true);
-    params.num_accepted_tokens_host = num_accepted_tokens_host;
-    params.mtp_topk_state =
-        mtp_topk_state == nullptr ? nullptr : mtp_topk_state->to(device);
-    params.multi_block_tables.reserve(multi_block_tables.size());
-    for (const auto& table : multi_block_tables) {
-      params.multi_block_tables.emplace_back(
-          safe_to(table, table.options().device(torch::kCPU), true));
-    }
-    materialize_linear_state_indices(params.embedding, device);
-#if defined(USE_MUSA)
-    params.attn_metadata = attn_metadata;
-#endif
-    return params;
+    return detail::transfer_model_params(*this, device);
   }
 
   void clear_linear_attention_state() {
@@ -83,46 +41,12 @@ class LlmModelParams final {
     linear_state_validity_mask.clear();
   }
 
-  bool synchronize_layer(int64_t layer_idx) const {
-    if (parallel.layer_wise_load_synchronizer == nullptr) {
-      return true;
-    }
-    CHECK_GE(layer_idx, 0);
-    if (static_cast<uint64_t>(layer_idx) % parallel.layers_per_event == 0) {
-      return parallel.layer_wise_load_synchronizer->synchronize_layer(
-          layer_idx / parallel.layers_per_event);
-    }
-    return true;
-  }
-
-  bool synchronize_draft_layer() const {
-    if (parallel.layer_wise_load_synchronizer == nullptr ||
-        !parallel.draft_load_event_index.has_value()) {
-      return true;
-    }
-    return parallel.layer_wise_load_synchronizer->synchronize_layer(
-        static_cast<int64_t>(*parallel.draft_load_event_index));
-  }
-
-  bool record_layer(uint32_t layer_idx, const torch::Device& device) const {
-#if defined(USE_MLU) || defined(USE_DCU)
-    if (parallel.layer_synchronizer != nullptr) {
-      return parallel.layer_synchronizer->record_current(layer_idx,
-                                                         device.index());
-    }
-#else
-    (void)layer_idx;
-    (void)device;
-#endif
-    return true;
-  }
-
   BatchInputMeta meta;
   LlmAttentionInput attention;
-  LlmEmbeddingInput embedding;
+  ModelEmbeddingInput embedding;
   ParallelInput parallel;
   ExpertInput expert;
-  LlmGraphInput graph;
+  ModelGraphInput graph;
   std::vector<torch::Tensor> multi_block_tables;
   std::vector<int64_t> linear_state_validity_mask;
   bool prefill_without_cache = false;
@@ -131,6 +55,9 @@ class LlmModelParams final {
   std::vector<int64_t> num_accepted_tokens_host;
   std::shared_ptr<layer::AttentionMetadata> attn_metadata;
   bool enable_graph = false;
+
+ private:
+  LlmModelParams(const LlmModelParams&) = default;
 };
 
 }  // namespace xllm

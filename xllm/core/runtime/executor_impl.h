@@ -32,6 +32,7 @@ limitations under the License.
 
 namespace xllm {
 
+class MMBatchData;
 class ProcessGroup;
 
 struct SpecVerifyGraphTaskSignal {
@@ -55,6 +56,12 @@ class ExecutorImpl {
                           const torch::Tensor& positions,
                           std::vector<KVCache>& kv_caches,
                           const ModelParamsView& params) = 0;
+
+  virtual ModelOutput run_multimodal(const torch::Tensor& tokens,
+                                     const torch::Tensor& positions,
+                                     std::vector<KVCache>& kv_caches,
+                                     const ModelParamsView& params,
+                                     MMBatchData& mm_data);
 
   virtual void prepare_graph_input(const torch::Tensor& /*tokens*/,
                                    const torch::Tensor& /*positions*/,

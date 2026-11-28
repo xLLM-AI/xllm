@@ -341,7 +341,7 @@ TEST_F(VlmSharedMemoryInputTest,
   {
     VlmForwardInput source = make_input<VlmForwardInput>({});
     auto pixels = expected.clone();
-    source.input_params.multimodal.mm_data.batch({MMData(
+    source.mm_data_.batch({MMData(
         MMType::IMAGE,
         MMItemVec{MMDataItem(MMType::IMAGE, {{"pixel_values", pixels}})})});
     proto::PackedForwardInput packed;
@@ -352,8 +352,7 @@ TEST_F(VlmSharedMemoryInputTest,
   const VlmForwardInput decoded =
       lazy.to(torch::Device(torch::kCPU), torch::kFloat32);
   const auto pixels =
-      decoded.input_params.multimodal.mm_data.get<torch::Tensor>(
-          "pixel_values");
+      decoded.mm_data_.get<torch::Tensor>(/*key=*/"pixel_values");
   ASSERT_TRUE(pixels.has_value());
   EXPECT_TRUE(torch::equal(*pixels, expected));
 }
@@ -370,7 +369,7 @@ TEST_F(VlmSharedMemoryInputTest,
   {
     VlmForwardInput source = make_input<VlmForwardInput>({});
     auto pixels = expected.clone();
-    source.input_params.multimodal.mm_data.batch({MMData(
+    source.mm_data_.batch({MMData(
         MMType::IMAGE,
         MMItemVec{MMDataItem(MMType::IMAGE, {{"pixel_values", pixels}})})});
     ASSERT_TRUE(writer.input_write(source));
@@ -382,8 +381,7 @@ TEST_F(VlmSharedMemoryInputTest,
       torch::Device(torch::kCPU),
       InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
   const auto pixels =
-      decoded.input_params.multimodal.mm_data.get<torch::Tensor>(
-          "pixel_values");
+      decoded.mm_data_.get<torch::Tensor>(/*key=*/"pixel_values");
   ASSERT_TRUE(pixels.has_value());
   EXPECT_TRUE(torch::equal(*pixels, expected));
 }
