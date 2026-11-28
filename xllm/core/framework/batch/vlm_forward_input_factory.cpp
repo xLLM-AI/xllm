@@ -20,6 +20,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/batch/batch_group.h"
+#include "core/framework/batch/shared_kv_mapping_tracker.h"
 #include "core/util/threadpool.h"
 
 namespace xllm {
@@ -28,6 +29,13 @@ VlmForwardInputFactory::VlmForwardInputFactory(
     VlmForwardInputFactoryOptions options)
     : options_(options) {
   CHECK_GT(options_.dp_size, 0);
+  if (options_.enable_shared_kv_cache_deltas) {
+    dp_shared_kv_mapping_trackers_.reserve(options_.dp_size);
+    for (uint32_t rank = 0; rank < options_.dp_size; ++rank) {
+      dp_shared_kv_mapping_trackers_.emplace_back(
+          std::make_unique<SharedKVMappingTracker>());
+    }
+  }
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/16,
       /*cpu_binding=*/false,
@@ -41,6 +49,9 @@ void VlmForwardInputFactory::create_inputs(
     const ModelArgs& model_args,
     std::vector<VlmForwardInput>& inputs) {
   CHECK_EQ(batches.size(), options_.dp_size);
+  for (const auto& tracker : dp_shared_kv_mapping_trackers_) {
+    tracker->begin();
+  }
   PreparationState state;
   state.inputs.reserve(options_.dp_size);
   state.dp_token_counts.resize(options_.dp_size);
@@ -55,6 +66,18 @@ void VlmForwardInputFactory::create_inputs(
   inputs = std::move(state.inputs);
 }
 
+void VlmForwardInputFactory::acknowledge_shared_kv_cache() {
+  for (const auto& tracker : dp_shared_kv_mapping_trackers_) {
+    tracker->acknowledge();
+  }
+}
+
+void VlmForwardInputFactory::reset_shared_kv_mapping_tracker() {
+  for (const auto& tracker : dp_shared_kv_mapping_trackers_) {
+    tracker->reset();
+  }
+}
+
 void VlmForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
                                                  const ModelArgs& model_args,
                                                  PreparationState& state) {
@@ -65,9 +88,13 @@ void VlmForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
       empty_input.input_params.meta.batch_id = UNINITIALIZED_BATCH_ID;
       state.inputs.emplace_back(std::move(empty_input));
     } else {
+      SharedKVMappingTracker* tracker =
+          options_.enable_shared_kv_cache_deltas
+              ? dp_shared_kv_mapping_trackers_[dp_rank].get()
+              : nullptr;
       state.inputs.emplace_back(
           batches[dp_rank].prepare_forward_input<VlmForwardInput>(
-              model_args, threadpool_.get()));
+              model_args, threadpool_.get(), /*cp_size=*/1, tracker));
     }
     const auto& input = state.inputs[dp_rank];
     const auto& meta = input.input_params.meta;
