@@ -574,6 +574,20 @@ void npu_mega_gdn_mtp_decode_varlen(const torch::Tensor& qkv,
                                     torch::Tensor& out,
                                     bool fla_ssm_state_layout);
 
+void validate_dual_affine_layer_norm(const torch::Tensor& x,
+                                     const torch::Tensor& gamma1,
+                                     const torch::Tensor& beta1,
+                                     const torch::Tensor& gamma2,
+                                     const torch::Tensor& beta2,
+                                     double epsilon);
+std::tuple<torch::Tensor, torch::Tensor> dual_affine_layer_norm(
+    const torch::Tensor& x,
+    const torch::Tensor& gamma1,
+    const torch::Tensor& beta1,
+    const torch::Tensor& gamma2,
+    const torch::Tensor& beta2,
+    double epsilon);
+
 torch::Tensor layer_norm_fwd_aclnn(
     const torch::Tensor& x,
     const torch::Tensor& weight,
