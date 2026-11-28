@@ -21,12 +21,14 @@ limitations under the License.
 #include <torch/python.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include "core/framework/config/dit_config.h"
+#include "core/framework/dit_cache/dit_cache_config.h"
 #include "core/framework/model_context/dit_model_context.h"
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/process_group.h"
@@ -93,43 +95,117 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
   py::object pipeline_class =
       py::module_::import("xllm.python.dit.registry")
           .attr("get_pipeline_class")(context.model_type());
-  pipeline_ = pipeline_class(
-      c10::str(device()),
-      parallel.rank() == 0,
-      group_rank(tp),
-      group_size(tp),
-      group_rank(sp),
-      group_size(sp),
-      group_rank(vae),
-      group_size(vae),
-      py::cpp_function([tp](torch::Tensor input) {
+  auto make_pipeline = [&](py::kwargs keyword_args) {
+    return pipeline_class(
+        c10::str(device()),
+        parallel.rank() == 0,
+        group_rank(tp),
+        group_size(tp),
+        group_rank(sp),
+        group_size(sp),
+        group_rank(vae),
+        group_size(vae),
+        py::cpp_function([tp](torch::Tensor input) {
+          py::gil_scoped_release release;
+          return parallel_state::reduce(input, tp);
+        }),
+        py::cpp_function([tp](const torch::Tensor& input) {
+          py::gil_scoped_release release;
+          return parallel_state::gather(input, tp, /*dim=*/-1);
+        }),
+        py::cpp_function([sp](const torch::Tensor& input) {
+          py::gil_scoped_release release;
+          return parallel_state::gather(input, sp, /*dim=*/1);
+        }),
+        py::cpp_function([sp](const torch::Tensor& input,
+                              bool scatter_heads,
+                              bool async_ops) {
+          const int32_t scatter_dim = scatter_heads ? 2 : 1;
+          const int32_t gather_dim = scatter_heads ? 1 : 2;
+          std::function<torch::Tensor()> work;
+          {
+            py::gil_scoped_release release;
+            work = parallel_state::all_to_all_4D(
+                input, scatter_dim, gather_dim, async_ops, sp);
+          }
+          return py::cpp_function([work = std::move(work)]() mutable {
+            py::gil_scoped_release release;
+            return work();
+          });
+        }),
+        py::cpp_function([vae](const torch::Tensor& input) {
+          py::gil_scoped_release release;
+          if (vae == nullptr || vae->world_size() == 1) {
+            return input.unsqueeze(0);
+          }
+          return vae->allgather_base_sync(input);
+        }),
+        **keyword_args);
+  };
+  const DiTConfig& config = DiTConfig::get_instance();
+  const std::string task_type = config.dit_h3_task_type();
+  const bool minimax_h3 = context.model_type() == "MiniMaxH3ModularPipeline";
+  const bool minimax_h3_ref2va = minimax_h3 && task_type == "ref2va";
+  const bool vae_decoder_partition =
+      minimax_h3 && config.dit_minimax_h3_vae_decoder_partition();
+  const bool cache_dit =
+      minimax_h3_ref2va &&
+      context.get_dit_config().selected_policy == PolicyType::CACHE_DIT;
+  CHECK(!vae_decoder_partition || minimax_h3_ref2va)
+      << "MiniMax-H3 video VAE decoder partition requires ref2va";
+  py::kwargs pipeline_args;
+  pipeline_args["global_rank"] = parallel.rank();
+  if (minimax_h3_ref2va) {
+    pipeline_args["task_type"] = task_type;
+    pipeline_args["sp_communication_overlap"] =
+        config.dit_sp_communication_overlap();
+    pipeline_args["tp_broadcast"] =
+        py::cpp_function([tp](const torch::Tensor& input, int32_t root_rank) {
+          torch::Tensor tensor = input.contiguous();
+          if (tp != nullptr) {
+            py::gil_scoped_release release;
+            tp->broadcast(tensor, root_rank);
+          }
+          return tensor;
+        });
+    if (vae_decoder_partition) {
+      CHECK_EQ(group_rank(tp), group_rank(vae) % 2)
+          << "MiniMax-H3 video VAE decoder partition requires each TP2 pair to "
+             "own adjacent VAE ranks";
+      pipeline_args["vae_decoder_partition"] = true;
+      pipeline_args["vae_barrier"] = py::cpp_function([vae]() {
         py::gil_scoped_release release;
-        return parallel_state::reduce(input, tp);
-      }),
-      py::cpp_function([tp](const torch::Tensor& input) {
-        py::gil_scoped_release release;
-        return parallel_state::gather(input, tp, /*dim=*/-1);
-      }),
-      py::cpp_function([sp](const torch::Tensor& input) {
-        py::gil_scoped_release release;
-        return parallel_state::gather(input, sp, /*dim=*/1);
-      }),
-      py::cpp_function([sp](const torch::Tensor& input, bool scatter_heads) {
-        py::gil_scoped_release release;
-        const int32_t scatter_dim = scatter_heads ? 2 : 1;
-        const int32_t gather_dim = scatter_heads ? 1 : 2;
-        return parallel_state::all_to_all_4D(
-            input, scatter_dim, gather_dim, /*async_ops=*/false, sp)();
-      }),
-      py::cpp_function([vae](const torch::Tensor& input) {
-        py::gil_scoped_release release;
-        if (vae == nullptr || vae->world_size() == 1) {
-          return input.unsqueeze(0);
+        if (vae != nullptr) {
+          vae->barrier();
         }
-        return vae->allgather_base_sync(input);
-      }),
-      py::arg("laser_attention_enabled") =
-          DiTConfig::get_instance().dit_laser_attention_enabled());
+      });
+    }
+    if (cache_dit) {
+      const CacheDiTOptions& options = context.get_dit_config().cache_dit;
+      py::dict cache_options;
+      cache_options["warmup_steps"] = options.warmup_steps;
+      cache_options["residual_diff_threshold"] =
+          options.residual_diff_threshold;
+      cache_options["max_cached_steps"] = options.max_cached_steps;
+      cache_options["max_consecutive_hits"] = options.max_consecutive_hits;
+      cache_options["front_blocks"] = options.front_blocks;
+      cache_options["back_blocks"] = options.back_blocks;
+      cache_options["linear_residual_prediction"] =
+          options.linear_residual_prediction;
+      pipeline_args["sp_reduce"] = py::cpp_function([sp](torch::Tensor input) {
+        py::gil_scoped_release release;
+        return parallel_state::reduce(input, sp);
+      });
+      pipeline_args["cache_options"] = cache_options;
+    }
+    if (config.dit_minimax_h3_rainfusion_enabled()) {
+      pipeline_args["rainfusion_enabled"] = true;
+    }
+  } else {
+    pipeline_args["laser_attention_enabled"] =
+        config.dit_laser_attention_enabled();
+  }
+  pipeline_ = make_pipeline(std::move(pipeline_args));
 }
 
 PyDiTModel::~PyDiTModel() { clear_python_object(pipeline_); }

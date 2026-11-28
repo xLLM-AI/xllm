@@ -84,6 +84,20 @@ DiTCacheConfig parse_dit_cache_from_flags() {
         ::xllm::DiTConfig::get_instance().dit_cache_end_blocks();
     cache_config.residual_cache.skip_interval_steps =
         ::xllm::DiTConfig::get_instance().dit_cache_skip_interval_steps();
+  } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() ==
+             "CacheDiT") {
+    const DiTConfig& config = DiTConfig::get_instance();
+    cache_config.selected_policy = PolicyType::CACHE_DIT;
+    CacheDiTOptions& options = cache_config.cache_dit;
+    options.warmup_steps = config.dit_cachedit_warmup_steps();
+    options.residual_diff_threshold =
+        static_cast<float>(config.dit_cachedit_residual_diff_threshold());
+    options.max_cached_steps = config.dit_cachedit_max_cached_steps();
+    options.max_consecutive_hits = config.dit_cachedit_max_consecutive_hits();
+    options.front_blocks = config.dit_cachedit_front_blocks();
+    options.back_blocks = config.dit_cachedit_back_blocks();
+    options.linear_residual_prediction =
+        config.dit_cachedit_linear_residual_prediction();
   } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() == "None") {
     cache_config.selected_policy = PolicyType::None;
   }
@@ -124,6 +138,11 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
   if (model_type != checkpoint_model_type) {
     LOG(WARNING) << "could not find model_type: " << checkpoint_model_type
                  << ", using model_id: " << model_type << " instead.";
+  }
+  if (cache_config.selected_policy == PolicyType::CACHE_DIT &&
+      model_type != "MiniMaxH3ModularPipeline") {
+    LOG(ERROR) << "CacheDiT requires the MiniMax-H3 model";
+    return false;
   }
 
   // H3 was dense before cache integration. Preserve that default while

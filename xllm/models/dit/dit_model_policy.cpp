@@ -22,6 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/options.h"
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/framework/request/dit_request_params.h"
@@ -31,13 +32,8 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-const char* validate_minimax_h3_t2va_request(const DiTRequestParams& params) {
-  const auto& generation = params.generation_params;
-  if (params.request_kind != DiTRequestKind::kVideo ||
-      !params.input_params.media_sources.entries().empty() ||
-      generation.num_videos_per_prompt != 1) {
-    return "Python MiniMax-H3 supports T2VA with one video per request";
-  }
+const char* validate_minimax_h3_generation(
+    const DiTGenerationParams& generation) {
   if (generation.audio_sampling_rate != 32000 || generation.num_frames <= 0 ||
       !std::isfinite(generation.video_fps) || generation.video_fps <= 0.0) {
     return "Python MiniMax-H3 requires 32 kHz audio, positive frames and fps";
@@ -48,6 +44,11 @@ const char* validate_minimax_h3_t2va_request(const DiTRequestParams& params) {
       (frames + 16.0) / generation.video_fps > 15.0) {
     return "Python MiniMax-H3 duration must be between 5 and 15 seconds";
   }
+  return nullptr;
+}
+
+const char* validate_minimax_h3_prompt_embed(const DiTRequestParams& params,
+                                             bool ref2va) {
   const auto source =
       params.input_params.tensor_sources.get_named_tensor("prompt_embed");
   if (!source.has_value()) {
@@ -60,13 +61,49 @@ const char* validate_minimax_h3_t2va_request(const DiTRequestParams& params) {
   }
   const auto* tags = get_tensor_parameter<std::vector<int64_t>>(
       source->get().parameters, "prompt_token_tags");
-  if (tags == nullptr ||
-      tags->size() != static_cast<size_t>(embedding.size(0)) ||
+  const bool tag_count_matches =
+      tags != nullptr && tags->size() == static_cast<size_t>(embedding.size(0));
+  if (ref2va) {
+    if (!tag_count_matches ||
+        !std::all_of(tags->begin(), tags->end(), [](int64_t tag) {
+          return tag == 0 || tag == 1;
+        })) {
+      return "Python MiniMax-H3 Ref2VA requires L prompt_token_tags with only "
+             "video/text tags";
+    }
+    return nullptr;
+  }
+  if (!tag_count_matches ||
       !std::all_of(
           tags->begin(), tags->end(), [](int64_t tag) { return tag == 1; })) {
     return "Python MiniMax-H3 T2VA requires L text-only prompt_token_tags";
   }
   return nullptr;
+}
+
+const char* validate_minimax_h3_t2va_request(const DiTRequestParams& params) {
+  if (params.request_kind != DiTRequestKind::kVideo ||
+      !params.input_params.media_sources.entries().empty() ||
+      params.generation_params.num_videos_per_prompt != 1) {
+    return "Python MiniMax-H3 supports T2VA with one video per request";
+  }
+  if (const char* error =
+          validate_minimax_h3_generation(params.generation_params)) {
+    return error;
+  }
+  return validate_minimax_h3_prompt_embed(params, /*ref2va=*/false);
+}
+
+const char* validate_minimax_h3_ref2va_request(const DiTRequestParams& params) {
+  if (params.request_kind != DiTRequestKind::kVideo ||
+      params.generation_params.num_videos_per_prompt != 1) {
+    return "Python MiniMax-H3 supports Ref2VA with one video per request";
+  }
+  if (const char* error =
+          validate_minimax_h3_generation(params.generation_params)) {
+    return error;
+  }
+  return validate_minimax_h3_prompt_embed(params, /*ref2va=*/true);
 }
 
 }  // namespace
@@ -87,6 +124,10 @@ DiTRequestPolicy resolve_dit_request_policy(const Options& options,
       get_model_type(options.model_path(), options.backend()),
       options.model_id());
   if (model_type == "MiniMaxH3ModularPipeline") {
+    if (DiTConfig::get_instance().dit_h3_task_type() == "ref2va") {
+      return {.validator = validate_minimax_h3_ref2va_request,
+              .required_batch_size = 1};
+    }
     return {.validator = validate_minimax_h3_t2va_request,
             .required_batch_size = 1};
   }

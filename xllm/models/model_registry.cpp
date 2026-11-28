@@ -18,8 +18,15 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#if defined(USE_NPU)
+#include <acl/acl.h>
+#endif
+
 #include <algorithm>
+#include <cctype>
 #include <iostream>
+#include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
@@ -87,6 +94,23 @@ std::string canonical_model_impl(std::string model_impl) {
     return "python";
   }
   return model_impl;
+}
+
+bool is_ascend_a3() {
+#if defined(USE_NPU)
+  const char* soc_name = aclrtGetSocName();
+  if (soc_name == nullptr) {
+    return false;
+  }
+  std::string upper_soc_name(soc_name);
+  for (char& ch : upper_soc_name) {
+    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  }
+  return upper_soc_name.find("ASCEND910_93") != std::string::npos ||
+         upper_soc_name.find("910C") != std::string::npos;
+#else
+  return false;
+#endif
 }
 
 #if defined(USE_NPU)
@@ -849,21 +873,41 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context) {
             Platform::type_torch()) {
       const auto& config = DiTConfig::get_instance();
       const auto& parallel = context.get_parallel_args();
-      CHECK_EQ(config.dit_h3_task_type(), "fl2va")
-          << "Python MiniMax-H3 supports T2VA with fl2va weights";
-      CHECK(context.get_dit_config().selected_policy == PolicyType::None)
-          << "Python MiniMax-H3 requires dit_cache_policy=None";
+      const std::string& task_type = config.dit_h3_task_type();
+      const PolicyType cache_policy = context.get_dit_config().selected_policy;
+      CHECK(cache_policy == PolicyType::None ||
+            (cache_policy == PolicyType::CACHE_DIT && task_type == "ref2va"))
+          << "Python MiniMax-H3 supports dit_cache_policy=None or CacheDiT on "
+             "Ref2VA";
+      CHECK(task_type != "ref2va" || !config.dit_laser_attention_enabled())
+          << "Python MiniMax-H3 Ref2VA requires "
+             "dit_laser_attention_enabled=false";
       CHECK(!config.dit_sparse_attention_enabled() &&
             !ExecutionConfig::get_instance().enable_graph() &&
             !LoadConfig::get_instance().enable_rolling_load())
           << "Python MiniMax-H3 requires dense eager execution";
-      CHECK(parallel.world_size() == 4 && parallel.tp_size() == 2 &&
-            parallel.sp_size() == 2 && parallel.vae_size() == 4 &&
-            parallel.cfg_size() == 1 && parallel.dp_size() == 1 &&
-            parallel.dit_tp_group_ != nullptr &&
+      const bool four_device_fl2va =
+          task_type == "fl2va" && parallel.world_size() == 4 &&
+          parallel.tp_size() == 2 && parallel.sp_size() == 2 &&
+          parallel.vae_size() == 4;
+      const bool a3_ref2va =
+          task_type == "ref2va" && parallel.world_size() == 16 &&
+          parallel.tp_size() == 2 && parallel.sp_size() == 8 &&
+          parallel.vae_size() == 16 && is_ascend_a3();
+      CHECK(!config.dit_minimax_h3_vae_decoder_partition() || a3_ref2va)
+          << "dit_minimax_h3_vae_decoder_partition requires A3 Ref2VA with "
+             "TP2, SP8 "
+             "and VAE16";
+      CHECK(!config.dit_minimax_h3_rainfusion_enabled() || a3_ref2va)
+          << "dit_minimax_h3_rainfusion_enabled requires A3 Ref2VA with TP2, "
+             "SP8 and "
+             "VAE16";
+      CHECK((four_device_fl2va || a3_ref2va) && parallel.cfg_size() == 1 &&
+            parallel.dp_size() == 1 && parallel.dit_tp_group_ != nullptr &&
             parallel.dit_sp_group_ != nullptr &&
             parallel.dit_vae_group_ != nullptr)
-          << "Python MiniMax-H3 requires TP2, SP2, VAE4, CFG1 and DP1";
+          << "Python MiniMax-H3 requires FL2VA on TP2/SP2/VAE4 or Ref2VA on "
+             "A3 TP2/SP8/VAE16, with CFG1 and DP1";
       CHECK_EQ(config.max_requests_per_batch(), 1);
       CHECK(context.get_quant_args("transformer").quant_method().empty())
           << "Python MiniMax-H3 requires dense floating point weights";
