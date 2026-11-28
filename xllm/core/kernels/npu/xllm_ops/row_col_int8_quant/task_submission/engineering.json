@@ -1,0 +1,113 @@
+{
+  "status": "passed",
+  "npu_executed": true,
+  "negative_checks": 6,
+  "streams": [
+    {
+      "case_name": "RowColInt8Quant_004_float16_random",
+      "status": "passed",
+      "calls": 10
+    },
+    {
+      "case_name": "RowColInt8Quant_008_float16_random",
+      "status": "passed",
+      "calls": 10
+    }
+  ],
+  "memory": [
+    {
+      "case_name": "RowColInt8Quant_004_float16_random",
+      "explicit_output_and_workspace_bytes": 17341712,
+      "workspace_bytes": 16809216,
+      "allocator_before": 527872,
+      "allocator_peak": 1095168,
+      "allocator_after": 527872,
+      "allocator_after_20_calls": 527872,
+      "scope": "PyTorch live tensor allocator only; not total device HBM or driver memory",
+      "native_allocator_peak_delta": 17344000,
+      "direct_workspace_bytes": 32000,
+      "native_workspace_bytes": 16809216,
+      "native_allocator_after_20_calls": 527872,
+      "native_allocator_before_20_calls": 527872,
+      "fp32_absmax_round_cast_allocator_peak_delta": 4495872,
+      "two_dynamic_quant_transpose_allocator_peak_delta": 17840640
+    },
+    {
+      "case_name": "RowColInt8Quant_005_float16_random",
+      "explicit_output_and_workspace_bytes": 17883648,
+      "workspace_bytes": 16818176,
+      "allocator_before": 1576960,
+      "allocator_peak": 2686464,
+      "allocator_after": 1576960,
+      "allocator_after_20_calls": 1576960,
+      "scope": "PyTorch live tensor allocator only; not total device HBM or driver memory",
+      "native_allocator_peak_delta": 17886208,
+      "direct_workspace_bytes": 40960,
+      "native_workspace_bytes": 16818176,
+      "native_allocator_after_20_calls": 1049088,
+      "native_allocator_before_20_calls": 1049088,
+      "fp32_absmax_round_cast_allocator_peak_delta": 8950272,
+      "two_dynamic_quant_transpose_allocator_peak_delta": 18894848
+    },
+    {
+      "case_name": "RowColInt8Quant_006_float16_random",
+      "explicit_output_and_workspace_bytes": 25513984,
+      "workspace_bytes": 17104896,
+      "allocator_before": 9438208,
+      "allocator_peak": 18178048,
+      "allocator_after": 9438208,
+      "allocator_after_20_calls": 9438208,
+      "scope": "PyTorch live tensor allocator only; not total device HBM or driver memory",
+      "native_allocator_peak_delta": 25516544,
+      "direct_workspace_bytes": 327680,
+      "native_workspace_bytes": 17104896,
+      "native_allocator_after_20_calls": 8389120,
+      "native_allocator_before_20_calls": 8389120,
+      "fp32_absmax_round_cast_allocator_peak_delta": 71344128,
+      "two_dynamic_quant_transpose_allocator_peak_delta": 41961984
+    },
+    {
+      "case_name": "RowColInt8Quant_007_float16_random",
+      "explicit_output_and_workspace_bytes": 51675136,
+      "workspace_bytes": 18087936,
+      "allocator_before": 41944064,
+      "allocator_peak": 76845056,
+      "allocator_after": 41944064,
+      "allocator_after_20_calls": 41944064,
+      "scope": "PyTorch live tensor allocator only; not total device HBM or driver memory",
+      "native_allocator_peak_delta": 51677696,
+      "direct_workspace_bytes": 1310720,
+      "native_workspace_bytes": 18087936,
+      "native_allocator_after_20_calls": 33554944,
+      "native_allocator_before_20_calls": 33554944,
+      "fp32_absmax_round_cast_allocator_peak_delta": 285265920,
+      "two_dynamic_quant_transpose_allocator_peak_delta": 167791104
+    },
+    {
+      "case_name": "RowColInt8Quant_008_float16_random",
+      "explicit_output_and_workspace_bytes": 18973696,
+      "workspace_bytes": 16859136,
+      "allocator_before": 35652608,
+      "allocator_peak": 37852160,
+      "allocator_after": 35652608,
+      "allocator_after_20_calls": 35652608,
+      "scope": "PyTorch live tensor allocator only; not total device HBM or driver memory",
+      "native_allocator_peak_delta": 18976256,
+      "direct_workspace_bytes": 81920,
+      "native_workspace_bytes": 16859136,
+      "native_allocator_after_20_calls": 2097664,
+      "native_allocator_before_20_calls": 2097664,
+      "fp32_absmax_round_cast_allocator_peak_delta": 17848320,
+      "two_dynamic_quant_transpose_allocator_peak_delta": 20992512
+    }
+  ],
+  "early_release_cross_stream": "passed",
+  "output_lifetime": {
+    "status": "passed",
+    "case_name": "RowColInt8Quant_006_float16_random",
+    "retained_calls": 8,
+    "released_calls": 32,
+    "same_stream_pressure_calls": 32,
+    "distinct_live_output_storages": true
+  }
+}

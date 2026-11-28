@@ -1,0 +1,1649 @@
+[
+  {
+    "case_name": "RowColInt8Quant_000_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          1,
+          2
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          1,
+          2
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          1,
+          2
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          1
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          2
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_001_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          2,
+          2
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          2,
+          2
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          2,
+          2
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          2
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          2
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_002_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          3,
+          6
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          3,
+          6
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          3,
+          6
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          3
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          6
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_003_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          17
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          66
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_004_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          257,
+          1026
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          257,
+          1026
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          257,
+          1026
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          257
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          1026
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_005_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          128,
+          4096
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          128,
+          4096
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          128,
+          4096
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          128
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          4096
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_006_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          1024,
+          4096
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          1024,
+          4096
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          1024,
+          4096
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          1024
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          4096
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_007_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          4096,
+          4096
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          4096,
+          4096
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          4096,
+          4096
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          4096
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          4096
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_008_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          4096,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          4096,
+          256
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          4096,
+          256
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          4096
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          256
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_009_float16_zeros",
+    "op_name": "RowColInt8Quant",
+    "kind": "zeros",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          17
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          66
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_010_float16_zero_axes",
+    "op_name": "RowColInt8Quant",
+    "kind": "zero_axes",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          17
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          66
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_011_float16_extreme",
+    "op_name": "RowColInt8Quant",
+    "kind": "extreme",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          17,
+          66
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          17
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          66
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_012_float16_ties_row",
+    "op_name": "RowColInt8Quant",
+    "kind": "ties_row",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          1,
+          8
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          1,
+          8
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          1,
+          8
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          1
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          8
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_013_float16_ties_col",
+    "op_name": "RowColInt8Quant",
+    "kind": "ties_col",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          8,
+          2
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          8,
+          2
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          8,
+          2
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          8
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          2
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_014_float16_boundary",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          1,
+          4096
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          1,
+          4096
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          1,
+          4096
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          1
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          4096
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_015_float16_boundary",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          4096,
+          2
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          4096,
+          2
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          4096,
+          2
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          4096
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          2
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_016_float16_boundary",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          64,
+          254
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          64,
+          254
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          64,
+          254
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          64
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          254
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_017_float16_boundary",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          65,
+          258
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          65,
+          258
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          65,
+          258
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          65
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          258
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_018_float16_boundary",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          33,
+          510
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          33,
+          510
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          33,
+          510
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          33
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          510
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_audit_019_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          4096,
+          2
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          4096,
+          2
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          4096,
+          2
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          4096
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          2
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_audit_020_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          1,
+          4096
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          1,
+          4096
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          1,
+          4096
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          1
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          4096
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_audit_021_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          64,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          64,
+          256
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          64,
+          256
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          64
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          256
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_audit_022_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          65,
+          258
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          65,
+          258
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          65,
+          258
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          65
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          258
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_audit_023_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          32,
+          254
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          32,
+          254
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          32,
+          254
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          32
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          254
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_audit_024_float16_random",
+    "op_name": "RowColInt8Quant",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          33,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          33,
+          256
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          33,
+          256
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          33
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          256
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_audit_025_float16_subnormal",
+    "op_name": "RowColInt8Quant",
+    "kind": "subnormal",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          65,
+          258
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          65,
+          258
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          65,
+          258
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          65
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          258
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  },
+  {
+    "case_name": "RowColInt8Quant_audit_026_float16_signed_zero",
+    "op_name": "RowColInt8Quant",
+    "kind": "signed_zero",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "x",
+        "shape": [
+          33,
+          66
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "shape": [
+          33,
+          66
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "qCol",
+        "shape": [
+          33,
+          66
+        ],
+        "data_type": "int8",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "rowAbsmax",
+        "shape": [
+          33
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "colAbsmax",
+        "shape": [
+          66
+        ],
+        "data_type": "float32",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": []
+  }
+]

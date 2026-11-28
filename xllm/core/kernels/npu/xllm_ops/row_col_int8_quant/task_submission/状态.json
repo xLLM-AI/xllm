@@ -1,0 +1,10 @@
+{
+  "status": "passed",
+  "hardware": "Ascend910_9382",
+  "CANN": "9.1.0",
+  "primary_entry": "ACLNN",
+  "aclnn_package_built_and_installed": true,
+  "public_case_count": 27,
+  "all_builds_and_tests_via_ssh": true,
+  "external_PR_created": false
+}

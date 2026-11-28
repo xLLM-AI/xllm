@@ -1,0 +1,53 @@
+{
+  "status": "passed",
+  "primary_entry": "run() -> generated ACLNN API",
+  "public_cases": 27,
+  "performance_cases": 5,
+  "memory_cases": 5,
+  "negative_checks": 39,
+  "randomized_entry_checks": 24,
+  "verifier_checks": 3,
+  "performance_checks": [
+    {
+      "case_name": "RowColInt8Quant_004_float16_random",
+      "ratio": 0.14735635669152664,
+      "limit": 0.7692307692307692,
+      "status": "passed"
+    },
+    {
+      "case_name": "RowColInt8Quant_005_float16_random",
+      "ratio": 0.23457059426875612,
+      "limit": 0.7692307692307692,
+      "status": "passed"
+    },
+    {
+      "case_name": "RowColInt8Quant_006_float16_random",
+      "ratio": 0.3486465182858344,
+      "limit": 0.7692307692307692,
+      "status": "passed"
+    },
+    {
+      "case_name": "RowColInt8Quant_007_float16_random",
+      "ratio": 0.5244847288873858,
+      "limit": 1.0,
+      "status": "passed"
+    },
+    {
+      "case_name": "RowColInt8Quant_008_float16_random",
+      "ratio": 0.2718140120044279,
+      "limit": 0.7692307692307692,
+      "status": "passed"
+    }
+  ],
+  "coverage_counts": {
+    "public_input_cases": 27,
+    "extra_input_cases": 12,
+    "valid_input_cases": 39,
+    "negative_input_scenarios": 13,
+    "negative_entry_checks": 39,
+    "extra_entry_checks": 24,
+    "performance_cases": 5,
+    "memory_cases": 5,
+    "note": "Performance/memory reuse public input cases; repetitions and entry paths are not extra independent input cases."
+  }
+}

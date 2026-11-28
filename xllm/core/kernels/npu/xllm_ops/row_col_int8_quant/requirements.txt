@@ -1,0 +1,3 @@
+numpy
+ml_dtypes
+# Install torch and torch_npu versions matching the actual CANN image.
