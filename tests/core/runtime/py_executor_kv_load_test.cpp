@@ -154,7 +154,7 @@ patch.__enter__()
       EXPECT_EQ(config["enable_graph_mode_decode_no_padding"].cast<bool>(),
                 layerwise);
       EXPECT_EQ(
-          config["non_causal_decode_graph_warmup_max_kv_len"].cast<int32_t>(),
+          config["request_decode_graph_warmup_max_kv_len"].cast<int32_t>(),
           layerwise ? -1 : 4096);
       EXPECT_EQ(
           model_config["block_draft_graph_warmup_max_kv_len"].cast<int32_t>(),

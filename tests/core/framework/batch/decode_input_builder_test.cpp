@@ -366,6 +366,8 @@ TEST(DecodeInputBuilderTest,
               (std::vector<int32_t>{4, 5, 6, 20, 21, 22}));
     LlmModelParams params;
     build_decode_metadata(params, buffers, options);
+    EXPECT_EQ(params.meta.decode_kv_layout,
+              per_request ? DecodeKVLayout::REQUEST : DecodeKVLayout::TOKEN);
     const auto& batch = params.meta.execution_batch;
     EXPECT_EQ(batch.num_reqs, 2);
     EXPECT_EQ(batch.num_tokens, 6);
@@ -384,6 +386,7 @@ TEST(DecodeInputBuilderTest,
   const DecodeExpansionOptions options{
       {.query_width = 3, .per_request = true, .causal = false}, 4, 99};
   build_idle_decode_input(input, options);
+  EXPECT_EQ(input.input_params.meta.decode_kv_layout, DecodeKVLayout::REQUEST);
   EXPECT_EQ(tensor_to_vector<int32_t>(input.token_ids),
             (std::vector<int32_t>{99, 99, 99}));
   EXPECT_EQ(input.input_params.attention.host.new_cache_slots,

@@ -295,7 +295,7 @@ Graph-owned static metadata retains the same width during capture and replay.
 
 ### Decode graph preparation
 
-`DecodeAclGraphRunner` handles ordinary, expanded verification and non-causal
+`DecodeAclGraphRunner` handles ordinary, expanded verification and request-row
 multi-token decode through the same call sequence:
 `prepare_execution` → `warmup` → `execute`. Admission returns `None` for an
 unsupported layout before graph capture or replay starts. An admitted
@@ -306,17 +306,21 @@ keeps it local to that execution; callers must prepare again after scheduler
 metadata changes.
 
 The runner's `max_batch` always counts physical token rows, including every
-query token of a non-causal request. The executor rounds the per-rank request
-budget before expanding it to token capacity. Non-causal graph keys include the
+query token of a multi-token request. The executor rounds the per-rank request
+budget before expanding it to token capacity. Request-row graph keys include the
 padded token count, query width and page capacity; DP padding preserves complete
-requests. Their KV tables retain one row per request, while causal decode keeps
-its existing per-token KV representation. Both layouts share graph preparation,
+requests. Their KV tables retain one row per request; token-row decode keeps
+its existing per-token KV representation. Request-row layouts can serve either
+causal or non-causal attention. Both layouts share graph preparation,
 capture, replay and DP coordination, with layout-specific buffer filling.
 
 Python draft decode metadata keeps both prefill flags false, including for
 multi-token requests. The native metadata can retain kernel-routing flags;
-the Python metadata view removes that convention at the bridge. The bridge
-also declares whether decode KV rows address tokens or requests.
+the Python metadata view removes that convention at the bridge. The input builder
+declares whether decode KV rows address tokens or requests, and the bridge
+exports that layout independently of model graph support. DFlash draft execution
+remains eager. Request admission uses Host query lengths and ends with Device
+tensor shapes, without reading Device query lengths back to the Host.
 `DecodeAclGraphPreparation` resolves request query width, sequence count,
 padding and page capacity into a `RequestDecodeGraphLayout`. The runner has no
 causality mode: one instance can capture both KV row layouts, with buffer and
@@ -327,13 +331,13 @@ remain separate phases and are rejected by the decode graph runner.
 The runner owns its KV capacity tiers and uses `is_graph_warmup` to select
 startup pre-capture. The public `block_draft_graph_warmup_max_kv_len` option is
 retained for compatibility and translated at the bridge into
-`non_causal_decode_graph_warmup_max_kv_len`. It controls the non-causal layout
+`request_decode_graph_warmup_max_kv_len`. It controls the request-row layout
 inside `DecodeAclGraphRunner`: `0` pre-captures full context, `-1` keeps only
 required startup shapes, and positive values bound proactive capacity capture.
 Runtime capacity can still grow beyond that bound. The minimum profile context
 and query lookahead are shared by runtime bucket selection and startup tiers;
 DP ranks capture model-wide tiers in the same order before their local shape.
-Causal decode keeps its existing capacity tiers and startup-only capture rules.
+Token-row decode keeps its existing capacity tiers and startup-only capture rules.
 
 ## Adding an operator
 

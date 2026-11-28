@@ -539,7 +539,7 @@ def test_dspark_dp_warmup_recaptures_when_any_rank_is_missing() -> None:
 
 @pytest.mark.parametrize("dp_rank", [0, 1])
 def test_block_draft_dp_prewarm_keeps_collectives_aligned_for_unequal_capacities(dp_rank: int) -> None:
-    runner = _non_causal_runner(dp_size=2, dp_rank=dp_rank, non_causal_warmup_max_kv_len=4096)
+    runner = _non_causal_runner(dp_size=2, dp_rank=dp_rank, request_warmup_max_kv_len=4096)
     runner.max_model_len = 16384
     runner.attention_backend.logical_page_size = 128
     metadata = _non_causal_metadata(torch.zeros(1, 128, dtype=torch.int32))
@@ -757,7 +757,7 @@ def test_dspark_warmup_captures_once_per_page_capacity_bucket() -> None:
 def test_block_draft_startup_prewarms_large_buckets_with_short_metadata(
     max_model_len: int, expected: list[int]
 ) -> None:
-    runner = _non_causal_runner(non_causal_warmup_max_kv_len=0)
+    runner = _non_causal_runner(request_warmup_max_kv_len=0)
     runner.max_model_len = max_model_len
     runner.attention_backend.logical_page_size = 128
     metadata = _non_causal_metadata(torch.zeros(1, 1, dtype=torch.int32))
@@ -783,7 +783,7 @@ def test_block_draft_startup_prewarms_large_buckets_with_short_metadata(
 
 @pytest.mark.parametrize("limit,expected", [(-1, [32]), (4096, [32]), (8192, [64, 32])])
 def test_non_causal_warmup_limit_does_not_bound_runtime_capacity(limit: int, expected: list[int]) -> None:
-    runner = _non_causal_runner(non_causal_warmup_max_kv_len=limit)
+    runner = _non_causal_runner(request_warmup_max_kv_len=limit)
     runner.max_model_len = 16384
     runner.attention_backend.logical_page_size = 128
     metadata = _non_causal_metadata(torch.zeros(1, 1, dtype=torch.int32))
@@ -2185,5 +2185,48 @@ def test_non_causal_admission_uses_token_capacity_and_preserves_complete_request
     assert runner.prepare_execution(torch.arange(4 * width, dtype=torch.int32), metadata) is None
     metadata = _non_causal_metadata(torch.zeros(3, 2, dtype=torch.int32), query_width=width)
     assert runner.prepare_execution(tokens[:-1], metadata) is None
-    metadata.q_seq_lens[-1] = width + 1
+    metadata.q_seq_lens_host = metadata.q_seq_lens.clone()
+    metadata.q_seq_lens_host[-1] = width + 1
     assert runner.prepare_execution(tokens, metadata) is None
+
+
+@pytest.mark.parametrize("width", [1, 3])
+@pytest.mark.parametrize("host_lengths", [False, True])
+@pytest.mark.parametrize("leading_zero", [False, True])
+def test_request_admission_reads_only_host_query_values(width: int, host_lengths: bool, leading_zero: bool) -> None:
+    runner = DecodeAclGraphRunner(
+        nn.Identity(), _FakeNonCausalAttentionBackend(), torch.device("cpu"), max_batch=6, max_model_len=8
+    )
+    metadata = _non_causal_metadata(torch.zeros(2, 2, dtype=torch.int32), query_width=width)
+    if host_lengths:
+        metadata.q_seq_lens_host = metadata.q_seq_lens.clone()
+    if leading_zero:
+        metadata.q_cu_seq_lens_host_values.insert(0, 0)
+    device_lengths = Mock(spec=torch.Tensor)
+    device_lengths.dim.return_value = 1
+    device_lengths.numel.return_value = 2
+    for method in ("to", "cpu", "tolist", "item"):
+        getattr(device_lengths, method).side_effect = AssertionError("Device query lengths must not be read")
+    metadata.q_seq_lens = device_lengths
+
+    preparation = runner.prepare_execution(torch.arange(2 * width, dtype=torch.int32), metadata)
+
+    assert preparation is not None
+    assert preparation.request_layout.query_width == width
+    assert preparation.request_layout.sequence_count == 2
+
+
+@pytest.mark.parametrize("invalid", ["host_rows", "host_widths", "query_ends", "missing_ends"])
+def test_request_admission_rejects_inconsistent_host_query_geometry(invalid: str) -> None:
+    runner = _non_causal_runner(max_sequences=2)
+    metadata = _non_causal_metadata(torch.zeros(2, 2, dtype=torch.int32))
+    if invalid == "host_rows":
+        metadata.q_seq_lens_host = torch.tensor([2], dtype=torch.int32)
+    elif invalid == "host_widths":
+        metadata.q_seq_lens_host = torch.tensor([1, 3], dtype=torch.int32)
+    elif invalid == "query_ends":
+        metadata.q_cu_seq_lens_host_values = [1, 4]
+    else:
+        metadata.q_cu_seq_lens_host_values = None
+
+    assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None

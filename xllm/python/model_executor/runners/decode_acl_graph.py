@@ -70,10 +70,10 @@ from xllm.python.model_executor.runners.decode_cuda_graph import (
     _decode_bucket,
 )
 from xllm.python.model_executor.runners.kv_capacity import (
-    NON_CAUSAL_WARMUP_CONTEXT_PAGES,
+    REQUEST_DECODE_WARMUP_CONTEXT_PAGES,
     kv_capacity_bucket,
     kv_capacity_buckets,
-    non_causal_kv_capacity_buckets,
+    request_decode_kv_capacity_buckets,
 )
 
 _GraphKey = tuple[object, ...]
@@ -186,7 +186,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         enable_mega_moe_token_mask: bool = False,
         *,
         is_spec_draft: bool = False,
-        non_causal_warmup_max_kv_len: int = 0,
+        request_warmup_max_kv_len: int = 0,
         enable_graph_mode_decode_no_padding: bool = False,
         device_kv_lengths: bool = False,
         kv_capacity_graphs: bool = False,
@@ -199,9 +199,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.max_model_len = max_model_len
         self.num_speculative_tokens = num_speculative_tokens
         self._is_spec_draft = is_spec_draft
-        if type(non_causal_warmup_max_kv_len) is not int or non_causal_warmup_max_kv_len < -1:
+        if type(request_warmup_max_kv_len) is not int or request_warmup_max_kv_len < -1:
             raise ValueError("Request-row decode graph warmup KV limit must be -1, zero or a positive integer")
-        self._non_causal_warmup_max_kv_len = non_causal_warmup_max_kv_len
+        self._request_warmup_max_kv_len = request_warmup_max_kv_len
         self._windowed_decode = (
             not getattr(attention_backend, "is_mla", False) and block_draft_model_window_context(model) is not None
         )
@@ -2134,11 +2134,19 @@ class DecodeAclGraphRunner(AclGraphRunner):
             return None
         if q_seq_lens.dim() != 1 or q_seq_lens.numel() == 0:
             return None
-        query_widths = q_seq_lens.to(torch.int64).tolist()
         query_width = metadata.decode_query_width
-        if query_width is None or query_width <= 0 or any(width != query_width for width in query_widths):
+        if query_width is None or query_width <= 0:
             return None
-        sequence_count = len(query_widths)
+        sequence_count = q_seq_lens.numel()
+        # The bridge supplies Host lengths and ends from the same producer as
+        # the Device tensor. Admission must not synchronize that tensor.
+        host_query_lens = getattr(metadata, "q_seq_lens_host", None)
+        if host_query_lens is not None and (
+            host_query_lens.shape != (sequence_count,)
+            or any(width != query_width for width in host_query_lens.tolist())
+        ):
+            return None
+        query_widths = [query_width] * sequence_count
         if input_ids.numel() > self.max_batch:
             return None
         if block_table.dim() != 2 or block_table.shape[0] != sequence_count:
@@ -2268,14 +2276,14 @@ class DecodeAclGraphRunner(AclGraphRunner):
             # Request-level KV tables use power-of-two capacities. Include
             # the short-model lookahead so startup and runtime select the same keys.
             model_pages = (self.max_model_len + page_size - 1) // page_size
-            warmup_length = min(self.max_model_len, page_size * NON_CAUSAL_WARMUP_CONTEXT_PAGES)
+            warmup_length = min(self.max_model_len, page_size * REQUEST_DECODE_WARMUP_CONTEXT_PAGES)
             warmup_pages = (warmup_length + query_width + page_size - 1) // page_size
             max_pages = 1 << (max(model_pages, warmup_pages) - 1).bit_length()
-            tiers = non_causal_kv_capacity_buckets(
+            tiers = request_decode_kv_capacity_buckets(
                 page_size,
                 max_pages,
                 query_width,
-                self._non_causal_warmup_max_kv_len,
+                self._request_warmup_max_kv_len,
             )
             # Model-wide tiers have the same order/count on every DP rank.
             # Keep the current local capacity as a separate final step: a
@@ -2328,7 +2336,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         required_capacity = 1 << (required_cols - 1).bit_length()
         query_width = metadata.decode_query_width
         assert query_width is not None
-        warmup_context_len = min(self.max_model_len, page_size * NON_CAUSAL_WARMUP_CONTEXT_PAGES)
+        warmup_context_len = min(self.max_model_len, page_size * REQUEST_DECODE_WARMUP_CONTEXT_PAGES)
         warmup_cols = max(1, (warmup_context_len + query_width + page_size - 1) // page_size)
         warmup_capacity = 1 << (warmup_cols - 1).bit_length()
         # The C++ profile warmup captures a 16-page block-diffusion shape.

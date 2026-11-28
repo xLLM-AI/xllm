@@ -689,7 +689,7 @@ def test_executor_reuses_non_causal_graph_with_fresh_preparation_and_rejects_cha
             metadata.kv_seq_lens.add_(1)
             metadata.kv_seq_lens_host_values[:] = metadata.kv_seq_lens.tolist()
 
-        metadata.q_seq_lens[1] = query_width + 1
+        metadata.q_cu_seq_lens_host_values[-1] += 1
         assert executor.execute(tokens, tokens, metadata) is executor.eager_runner.execute.return_value
         assert prepare.call_count == 3
 

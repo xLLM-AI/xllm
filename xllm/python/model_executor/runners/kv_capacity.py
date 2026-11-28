@@ -18,26 +18,26 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-# Match the C++ non-causal decode profile context before query lookahead.
-NON_CAUSAL_WARMUP_CONTEXT_PAGES = 16
+# Match the C++ request-row decode profile context before query lookahead.
+REQUEST_DECODE_WARMUP_CONTEXT_PAGES = 16
 
 
-def non_causal_kv_capacity_buckets(
+def request_decode_kv_capacity_buckets(
     page_size: int, max_pages: int, query_width: int, max_kv_length: int = 0
 ) -> tuple[int, ...]:
-    """Enumerate the existing non-causal decode graph capacities, largest first.
+    """Enumerate the existing request-row decode graph capacities, largest first.
 
     A positive length selects the bucket covering that bound, not a new
     nonstandard bucket. Zero covers the whole page table; minus one disables
     proactive capture without changing runtime admission or model capacity.
     """
     if any(type(value) is not int or value <= 0 for value in (page_size, max_pages, query_width)):
-        raise ValueError("Non-causal decode graph page and query capacities must be positive integers")
+        raise ValueError("Request-row decode graph page and query capacities must be positive integers")
     if type(max_kv_length) is not int or max_kv_length < -1:
-        raise ValueError("Non-causal decode graph warmup KV limit must be -1, zero or a positive integer")
+        raise ValueError("Request-row decode graph warmup KV limit must be -1, zero or a positive integer")
     if max_kv_length == -1:
         return ()
-    minimum_pages = NON_CAUSAL_WARMUP_CONTEXT_PAGES + (query_width + page_size - 1) // page_size
+    minimum_pages = REQUEST_DECODE_WARMUP_CONTEXT_PAGES + (query_width + page_size - 1) // page_size
     pages = min(1 << (minimum_pages - 1).bit_length(), max_pages)
     requested_pages = max_pages if max_kv_length == 0 else (max_kv_length + page_size - 1) // page_size
     maximum = min(1 << (max(pages, requested_pages) - 1).bit_length(), max_pages)

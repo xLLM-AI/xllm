@@ -236,10 +236,9 @@ const layer::ExpandedDecodeMetadata& PyExpandedDecodeMetadataView::metadata()
 PyAttentionMetadataView::PyAttentionMetadataView(
     std::shared_ptr<layer::AttentionMetadata> metadata,
     const ModelParamsView& params,
-    bool is_draft_engine,
-    DecodeKVLayout decode_kv_layout)
+    bool is_draft_engine)
     : metadata_(std::move(metadata)),
-      decode_kv_layout_(decode_kv_layout),
+      decode_kv_layout_(params.meta.decode_kv_layout),
       is_chunked_prefill_(
           metadata_->is_chunked_prefill &&
           !(is_draft_engine && params.meta.batch_forward_type.is_decode())),

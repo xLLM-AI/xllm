@@ -261,9 +261,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         is_mla: bool,
         device: torch.device,
         dtype: torch.dtype,
-        mla_block_draft: bool = False,
     ) -> None:
-        self._mla_block_draft = mla_block_draft
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -523,7 +521,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             if block_table is None:
                 raise ValueError("prepared MLA requires a block table for every forward type")
             query_tensor = metadata.q_cu_seq_lens
-            if self._mla_block_draft and query_tensor is not None and query_tensor.numel() == batch_size + 1:
+            if query_tensor is not None and query_tensor.numel() == batch_size + 1:
                 query_tensor = query_tensor[1:]
             kv_tensor = metadata.kv_seq_lens
             slot_mapping = metadata.slot_mapping
@@ -541,7 +539,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             if not query_ends or query_ends[-1] != slot_mapping.numel():
                 raise ValueError("prepared MLA query ends must describe all input tokens")
             query_lengths = [end - start for start, end in zip([0, *query_ends[:-1]], query_ends)]
-            if self._mla_block_draft and (
+            if getattr(metadata, "decode_kv_layout", "token") == "request" and (
                 not query_lengths or query_lengths[0] <= 0 or any(width != query_lengths[0] for width in query_lengths)
             ):
                 raise ValueError("MLA block attention requires fixed-width queries")
@@ -845,11 +843,14 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             else:
                 self._mla_actual_seq_q = actual_seq_q
                 self._mla_actual_seq_kv = actual_seq_kv
+            has_query_blocks = (
+                metadata.is_prefill
+                or metadata.is_chunked_prefill
+                or getattr(metadata, "decode_kv_layout", "token") == "request"
+            )
             if self.requires_host_kv_lengths:
                 query_ends = (
-                    actual_seq_q.cpu().tolist()
-                    if metadata.is_prefill or metadata.is_chunked_prefill or self._mla_block_draft
-                    else list(range(1, int(actual_seq_kv.numel()) + 1))
+                    actual_seq_q.cpu().tolist() if has_query_blocks else list(range(1, int(actual_seq_kv.numel()) + 1))
                 )
                 kv_lengths = (
                     list(kv_seq_lens_host_values)
@@ -860,7 +861,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             else:
                 self._mla_actual_seq_q_host = None
                 self._mla_actual_seq_kv_host = None
-            if metadata.is_prefill or metadata.is_chunked_prefill or self._mla_block_draft:
+            if has_query_blocks:
                 q_seq_lens = getattr(metadata, "q_seq_lens", None)
                 if q_seq_lens is not None and q_seq_lens.numel() > 0:
                     self._mla_max_seqlen_q = int(q_seq_lens.max().item())
@@ -1800,8 +1801,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         capacity constant and recompute the mask from Slot KV lengths inside
         capture, so accepted-prefix changes never expose stale cache rows.
         """
-        if not self._mla_block_draft or self._fia_with_rope is None:
-            raise RuntimeError("non-causal MLA requires the MLA block-draft FIA v2 backend")
+        if self._fia_with_rope is None:
+            raise RuntimeError("non-causal MLA requires FIA v2 with separate RoPE support")
         lengths = self._mla_actual_seq_kv
         query_ends = self._mla_actual_seq_q_host
         if lengths is None or not query_ends or block_table.shape[0] != len(query_ends):

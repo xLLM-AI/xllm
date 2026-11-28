@@ -316,6 +316,9 @@ inline void fill_request_layout(
   util::fill_query_start_loc(starts, batch.num_scheduled_tokens);
 }
 
+// Physical decode KV rows, independent of attention masks or graph support.
+enum class DecodeKVLayout : int8_t { TOKEN, REQUEST };
+
 struct BatchInputMeta {
   BatchForwardType batch_forward_type;
   int32_t num_sequences = 0;
@@ -324,6 +327,7 @@ struct BatchInputMeta {
   int32_t q_max_seq_len = 0;
   int32_t num_speculative_tokens = 0;
   ExecutionBatchMetadata execution_batch;
+  DecodeKVLayout decode_kv_layout = DecodeKVLayout::TOKEN;
   uint64_t batch_id = 0;
   bool requires_host_restore = false;
   bool is_graph_warmup = false;
