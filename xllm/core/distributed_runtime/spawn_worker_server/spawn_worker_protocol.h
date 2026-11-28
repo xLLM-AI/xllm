@@ -53,6 +53,8 @@ inline constexpr int32_t kEnableMmEncoderDpArgumentIndex =
     kLayerwiseSplitSizeArgumentIndex + 1;
 inline constexpr int32_t kEnableGraphVmmPoolArgumentIndex =
     kEnableMmEncoderDpArgumentIndex + 1;
+inline constexpr int32_t kEnablePrefixCacheArgumentIndex =
+    kEnableGraphVmmPoolArgumentIndex + 1;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
 
 inline std::optional<bool> parse_graph_vmm_pool(int32_t argc,

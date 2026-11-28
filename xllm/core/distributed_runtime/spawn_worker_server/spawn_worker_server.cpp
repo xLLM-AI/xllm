@@ -106,7 +106,8 @@ SpawnWorkerServer::SpawnWorkerServer(
     bool enable_graph_double_buffer,
     int32_t acl_graph_decode_batch_size_limit,
     spawn_worker_protocol::TopologyConfig topology_config,
-    bool enable_graph_vmm_pool) {
+    bool enable_graph_vmm_pool,
+    bool enable_prefix_cache) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -165,6 +166,7 @@ SpawnWorkerServer::SpawnWorkerServer(
       .enable_graph_mode_decode_no_padding(enable_graph_mode_decode_no_padding)
       .enable_prefill_piecewise_graph(enable_prefill_piecewise_graph)
       .max_tokens_for_graph_mode(max_tokens_for_graph_mode)
+      .enable_prefix_cache(enable_prefix_cache)
       .task_type(task_type)
       .instance_role(instance_role)
       .max_encoder_cache_size(max_encoder_cache_size);
@@ -193,6 +195,7 @@ SpawnWorkerServer::SpawnWorkerServer(
       .communication_backend(communication_backend);
   DistributedConfig::get_instance().master_node_addr(master_node_addr);
   KVCacheConfig::get_instance()
+      .enable_prefix_cache(enable_prefix_cache)
       .block_size(block_size)
       .indexer_cache_dtype(indexer_cache_dtype);
   KVCacheConfig::get_instance().validate();

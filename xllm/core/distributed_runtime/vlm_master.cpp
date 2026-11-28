@@ -238,6 +238,10 @@ VLMMaster::VLMMaster(const Options& options)
       .enable_graph(options_.enable_graph())
       .enable_graph_vmm_pool(
           ExecutionConfig::get_instance().enable_graph_vmm_pool())
+      .enable_graph_mm_encoder(
+          ExecutionConfig::get_instance().enable_graph_mm_encoder())
+      .mm_encoder_graph_capture_shapes(
+          ExecutionConfig::get_instance().mm_encoder_graph_capture_shapes())
       .enable_graph_double_buffer(options_.enable_graph_double_buffer())
       .acl_graph_decode_batch_size_limit(
           options_.acl_graph_decode_batch_size_limit())

@@ -90,14 +90,7 @@ void WorkerServer::create_server(const runtime::Options& options,
             options.enable_graph_mode_decode_no_padding())
         .enable_prefill_piecewise_graph(
             options.enable_prefill_piecewise_graph())
-        .max_tokens_for_graph_mode(options.max_tokens_for_graph_mode())
-        // Offline workers receive graph settings through runtime::Options, and
-        // the multimodal encoder graph has no slot there or in the spawn
-        // protocol. Leaving the gflags in force here would capture on a
-        // setting the offline caller can neither reach nor size, so the
-        // encoder stays eager on this path. Every offline worker evaluates
-        // this branch, so all ranks agree.
-        .enable_graph_mm_encoder(/*enable_graph_mm_encoder=*/false);
+        .max_tokens_for_graph_mode(options.max_tokens_for_graph_mode());
   }
 #if defined(USE_NPU)
   KernelConfig::get_instance().npu_kernel_backend(options.npu_kernel_backend());
@@ -435,9 +428,10 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         layerwise_split_size_str.c_str(),
                         enable_mm_encoder_dp_ptr,
                         options.enable_graph_vmm_pool() ? "1" : "0",
+                        options.enable_prefix_cache() ? "1" : "0",
                         nullptr};
   static_assert(std::size(argv) ==
-                spawn_worker_protocol::kEnableGraphVmmPoolArgumentIndex + 2);
+                spawn_worker_protocol::kEnablePrefixCacheArgumentIndex + 2);
   pid_t pid;
   int status = posix_spawnp(
       &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);
