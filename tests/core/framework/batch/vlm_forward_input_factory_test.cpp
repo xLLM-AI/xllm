@@ -13,8 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/vlm_forward_input_factory.h"
-
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -23,6 +21,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/batch_group.h"
+#include "core/framework/batch/forward_input_factory.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_args.h"
@@ -34,6 +33,8 @@ limitations under the License.
 
 namespace xllm {
 namespace {
+
+using VlmInputFactory = ForwardInputFactory<VlmForwardInput>;
 
 class VlmForwardInputFactoryTest : public ::testing::Test {
  protected:
@@ -111,10 +112,10 @@ TEST_F(VlmForwardInputFactoryTest, PreservesMixedRankTypesAndDpMetadata) {
   BatchGroup batches(2);
   batches[0].add(&prefill);
   batches[1].add(&decode);
-  VlmForwardInputFactoryOptions options;
+  ForwardInputFactoryOptions options;
   options.dp_size = 2;
   options.enable_dp_global_json_object_active = true;
-  VlmForwardInputFactory factory(options);
+  VlmInputFactory factory(options);
   std::vector<VlmForwardInput> inputs;
   factory.create_inputs(batches, ModelArgs(), inputs);
 
@@ -154,10 +155,10 @@ TEST_F(VlmForwardInputFactoryTest, EmptyRankUsesInstanceGraphDecodeOption) {
       }
       BatchGroup batches(2);
       batches[1].add(&sequence);
-      VlmForwardInputFactoryOptions options;
+      ForwardInputFactoryOptions options;
       options.dp_size = 2;
       options.enable_graph = enable_graph;
-      VlmForwardInputFactory factory(options);
+      VlmInputFactory factory(options);
       options.enable_graph = !enable_graph;
       std::vector<VlmForwardInput> inputs;
       factory.create_inputs(batches, ModelArgs(), inputs);
@@ -184,10 +185,10 @@ TEST_F(VlmForwardInputFactoryTest, EmptyRankUsesInstanceGraphDecodeOption) {
 
 TEST_F(VlmForwardInputFactoryTest, AllEmptyGroupClearsPreviousInputs) {
   ScopedGraphMode graph_mode(/*enabled=*/false);
-  VlmForwardInputFactoryOptions options;
+  ForwardInputFactoryOptions options;
   options.dp_size = 2;
   options.enable_graph = true;
-  VlmForwardInputFactory factory(options);
+  VlmInputFactory factory(options);
   std::vector<VlmForwardInput> inputs(1);
   inputs[0].token_ids = torch::tensor({42}, torch::kInt32);
   BatchGroup batches(2);
@@ -223,9 +224,9 @@ TEST_F(VlmForwardInputFactoryTest,
   ASSERT_TRUE(second_manager.allocate(&second));
   ASSERT_TRUE(replacement_manager.allocate(&replacement));
   ASSERT_TRUE(second_manager.allocate(&moved_slot));
-  VlmForwardInputFactoryOptions options;
+  ForwardInputFactoryOptions options;
   options.dp_size = 2;
-  VlmForwardInputFactory factory(options);
+  VlmInputFactory factory(options);
   auto prepare = [&](Sequence& remote) {
     first.kv_state().set_kv_cache_tokens_num(0);
     remote.kv_state().set_kv_cache_tokens_num(0);
@@ -319,14 +320,14 @@ TEST_F(VlmForwardInputFactoryTest, PropagatesWarmupToEmptyRanksAndClearsIt) {
     warmup.add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
     warmup.kv_state().set_kv_cache_tokens_num(2);
     warmup.append_token(Token(3));
-    VlmForwardInputFactoryOptions options;
+    ForwardInputFactoryOptions options;
     options.dp_size = 2;
     options.enable_graph = true;
-    VlmForwardInputFactory factory(options);
+    VlmInputFactory factory(options);
     BatchGroup batches(2);
     batches[active_rank].add(&warmup);
     std::vector<VlmForwardInput> inputs;
-    factory.create_inputs(batches, ModelArgs{}, inputs);
+    EXPECT_TRUE(factory.create_inputs(batches, ModelArgs{}, inputs));
     ASSERT_EQ(inputs.size(), 2u);
     for (const auto& input : inputs) {
       EXPECT_TRUE(input.input_params.meta.is_graph_warmup);
@@ -339,14 +340,15 @@ TEST_F(VlmForwardInputFactoryTest, PropagatesWarmupToEmptyRanksAndClearsIt) {
     BatchGroup serving_batches(2);
     serving_batches[1 - active_rank].add(&request);
     std::vector<VlmForwardInput> serving_inputs;
-    factory.create_inputs(serving_batches, ModelArgs{}, serving_inputs);
+    EXPECT_FALSE(
+        factory.create_inputs(serving_batches, ModelArgs{}, serving_inputs));
     for (const auto& input : serving_inputs) {
       EXPECT_FALSE(input.input_params.meta.is_graph_warmup);
       expect_packed_metadata(input);
     }
 
     BatchGroup empty_batches(2);
-    factory.create_inputs(empty_batches, ModelArgs{}, inputs);
+    EXPECT_FALSE(factory.create_inputs(empty_batches, ModelArgs{}, inputs));
     for (const auto& input : inputs) {
       EXPECT_FALSE(input.input_params.meta.is_graph_warmup);
     }

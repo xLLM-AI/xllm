@@ -87,7 +87,12 @@ class NpuBenchmarkRuntime final {
 
   ~NpuBenchmarkRuntime() {
     PyEval_RestoreThread(saved_thread_state_);
-    const int shutdown_ret = PyRun_SimpleString("torch_npu._npu_shutdown()\n");
+    const int shutdown_ret = PyRun_SimpleString(
+        "_shutdown = getattr(torch_npu, '_npu_shutdown', None)\n"
+        "if _shutdown is None:\n"
+        "    from torch_npu._init.core.runtime_lifecycle import "
+        "_npu_shutdown as _shutdown\n"
+        "_shutdown()\n");
     CHECK_EQ(shutdown_ret, 0) << "torch_npu benchmark runtime shutdown failed";
     // Keep Python alive and retain the GIL for torch_npu's global destructors,
     // matching the NPU test environment's process-exit lifecycle.
@@ -263,7 +268,7 @@ void benchmark_create_inputs(benchmark::State& state, Workload workload) {
   const size_t prompt_tokens = static_cast<size_t>(state.range(2));
   ForwardInputFactoryOptions options;
   options.dp_size = dp_size;
-  ForwardInputFactory factory(options);
+  ForwardInputFactory<LlmForwardInput> factory(options);
   BatchGroupFixture fixture(
       dp_size, sequences_per_rank, prompt_tokens, workload);
   const ModelArgs model_args{};
@@ -273,8 +278,8 @@ void benchmark_create_inputs(benchmark::State& state, Workload workload) {
   // Warm the thread pool and validate the repeated-call fixture before timing.
   for (size_t i = 0; i < 2; ++i) {
     fixture.restore();
-    factory.create_inputs(
-        fixture.batches(), model_args, inputs, is_graph_warmup);
+    is_graph_warmup =
+        factory.create_inputs(fixture.batches(), model_args, inputs);
     fixture.validate(inputs, is_graph_warmup, workload);
   }
   for (auto _ : state) {
@@ -284,8 +289,8 @@ void benchmark_create_inputs(benchmark::State& state, Workload workload) {
     std::vector<LlmForwardInput>().swap(inputs);
     fixture.restore();
     state.ResumeTiming();
-    factory.create_inputs(
-        fixture.batches(), model_args, inputs, is_graph_warmup);
+    is_graph_warmup =
+        factory.create_inputs(fixture.batches(), model_args, inputs);
     benchmark::DoNotOptimize(inputs);
     benchmark::DoNotOptimize(is_graph_warmup);
   }

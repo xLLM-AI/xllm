@@ -109,18 +109,19 @@ LLMEngine::LLMEngine(
   dp_size_ = options_.dp_size();
   const uint32_t cp_size = options_.cp_size();
   forward_input_factory_ =
-      std::make_unique<ForwardInputFactory>(ForwardInputFactoryOptions{
-          .dp_size = dp_size_,
-          .cp_size = cp_size,
-          .max_tokens_per_batch =
-              static_cast<int64_t>(options_.max_tokens_per_batch()),
-          .enable_graph = options_.enable_graph(),
-          .enable_dp_global_json_object_active =
-              dp_size_ > 1 && !options_.is_draft_engine() &&
-              options_.num_speculative_tokens() > 0,
-          .enable_shared_kv_cache_deltas =
-              KVCacheConfig::get_instance().enable_shared_kv_cache(),
-      });
+      std::make_unique<ForwardInputFactory<LlmForwardInput>>(
+          ForwardInputFactoryOptions{
+              .dp_size = dp_size_,
+              .cp_size = cp_size,
+              .max_tokens_per_batch =
+                  static_cast<int64_t>(options_.max_tokens_per_batch()),
+              .enable_graph = options_.enable_graph(),
+              .enable_dp_global_json_object_active =
+                  dp_size_ > 1 && !options_.is_draft_engine() &&
+                  options_.num_speculative_tokens() > 0,
+              .enable_shared_kv_cache_deltas =
+                  KVCacheConfig::get_instance().enable_shared_kv_cache(),
+          });
   worker_clients_num_ = worker_clients_.size();
   dp_local_size_ = worker_clients_num_ / dp_size_;
   // MLU and NPU model-side CP both use orthogonal CP x attention-TP, so the
@@ -509,9 +510,8 @@ ForwardOutput LLMEngine::step(BatchGroup& batch) {
       << " and actual batch size as " << batch.size() << ".";
 
   std::vector<LlmForwardInput> forward_inputs;
-  bool is_graph_warmup = false;
-  forward_input_factory_->create_inputs(
-      batch, args_, forward_inputs, is_graph_warmup);
+  const bool is_graph_warmup =
+      forward_input_factory_->create_inputs(batch, args_, forward_inputs);
   if (eplb_controller_ != nullptr) {
     eplb_controller_->on_step_dispatched(forward_inputs, is_graph_warmup);
   }
