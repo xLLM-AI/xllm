@@ -46,11 +46,7 @@ class BaseExecutorImpl : public ExecutorImpl {
 
  private:
   // not own
-  CausalLM* model_;
-
-  ModelArgs args_;
-  torch::Device device_;
-  runtime::Options options_;
+  DecoderModel* model_;
 };
 REGISTER_EXECUTOR("llm", BaseExecutorImpl);
 }  // namespace xllm

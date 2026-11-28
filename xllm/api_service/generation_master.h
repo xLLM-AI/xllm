@@ -109,12 +109,6 @@ class GenerationMaster final {
     });
   }
 
-  bool handle_rpc_response(const RequestOutput& output) const {
-    return visit([&](const auto& master) {
-      return master->handle_rpc_response(output);
-    });
-  }
-
  private:
   Masters master_;
 };

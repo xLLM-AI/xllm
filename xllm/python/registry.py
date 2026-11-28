@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from importlib import import_module
+from typing import NamedTuple
 
 import torch.nn as nn
 
@@ -23,7 +24,14 @@ from xllm.python.model_platform_support import MODEL_PLATFORM_SUPPORT
 from xllm.python.platform import current_platform
 
 _ModelPath = tuple[str, str]
-_REGISTRY: dict[str, _ModelPath] = {}
+
+
+class _ModelRegistration(NamedTuple):
+    path: _ModelPath
+    multimodal_path: _ModelPath | None = None
+
+
+_REGISTRY: dict[str, _ModelRegistration] = {}
 
 GLM5_NEXT_TARGET_FAMILY = ("glm5_next", "glm5_3_flash", "glm5_next_text")
 
@@ -34,25 +42,33 @@ def register_model(
     """Register a model class for callers that already imported its module."""
 
     def deco(cls: type[nn.Module]) -> type[nn.Module]:
-        path = (cls.__module__, cls.__name__)
+        registration = _ModelRegistration((cls.__module__, cls.__name__))
         for name in names:
-            _REGISTRY[name] = path
+            _REGISTRY[name] = registration
         return cls
 
     return deco
 
 
-def _register_model_path(module_name: str, class_name: str, *names: str) -> None:
-    path = (module_name, class_name)
+def _register_model_path(
+    module_name: str,
+    class_name: str,
+    *names: str,
+    multimodal_path: _ModelPath | None = None,
+) -> None:
+    registration = _ModelRegistration((module_name, class_name), multimodal_path)
     for name in names:
-        _REGISTRY[name] = path
+        _REGISTRY[name] = registration
 
 
-def get_model_class(name: str) -> type[nn.Module]:
+def get_model_class(name: str, *, backend: str = "llm") -> type[nn.Module]:
     if name not in _REGISTRY:
         raise KeyError(f"model '{name}' not registered; available: {sorted(_REGISTRY)}")
 
-    module_name, class_name = _REGISTRY[name]
+    registration = _REGISTRY[name]
+    module_name, class_name = (
+        registration.multimodal_path if backend == "vlm" and registration.multimodal_path else registration.path
+    )
     implementation = module_name.rsplit(".", 1)[-1]
     platform = current_platform.device_type()
     support = MODEL_PLATFORM_SUPPORT.get(implementation, {})
@@ -184,8 +200,8 @@ def _register_builtin_models() -> None:
         "xllm.python.models.glm5_next",
         "Glm5NextForCausalLM",
         *GLM5_NEXT_TARGET_FAMILY,
+        multimodal_path=("xllm.python.models.glm5_next_vl", "Glm5NextVLModel"),
     )
-    # Internal key selected by the C++ VLM model factory.
     _register_model_path(
         "xllm.python.models.glm5_next_vl",
         "Glm5NextVLModel",
@@ -206,6 +222,7 @@ def _register_builtin_models() -> None:
         "xllm.python.models.deepseek_ocr",
         "DeepseekOCRForCausalLM",
         "deepseek_ocr",
+        "deepseek_vl_v2",
         "DeepseekOCRForCausalLM",
     )
 

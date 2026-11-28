@@ -28,6 +28,12 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+int32_t final_full_page(const StaticKVBlockPool& pool, int32_t id) {
+  std::vector<int32_t> full_page_indices;
+  pool.append_full_block_rows(id, &full_page_indices);
+  return full_page_indices.front();
+}
+
 StaticKVLayoutSpec make_spec(size_t num_slots = 64,
                              size_t checkpoint_stride = 2,
                              size_t num_slabs = 12) {
@@ -121,15 +127,26 @@ TEST(StaticKVTensorAllocatorTest, PlansGeometryWithoutAllocatingCapacity) {
   EXPECT_EQ(layout.bank_bytes(), 0);
   EXPECT_EQ(layout.num_reserved_slabs(), 2);
   EXPECT_EQ(layout.full_read_padding_page(), 4);
-  EXPECT_EQ(layout.scratch_full_page(), 0);
   EXPECT_EQ(layout.full_pages_per_slab(), 4);
   EXPECT_EQ(layout.objects_per_slab(KVCacheTensorRole::KEY), 2);
   EXPECT_EQ(layout.objects_per_slab(KVCacheTensorRole::CONV), 8);
   EXPECT_EQ(layout.objects_per_slab(KVCacheTensorRole::SSM), 1);
-  EXPECT_EQ(layout.layer_bank_index(0), 0);
-  EXPECT_EQ(layout.layer_bank_index(3), 1);
-  EXPECT_EQ(layout.layer_bank_index(1), 0);
-  EXPECT_EQ(layout.layer_bank_index(2), 1);
+  EXPECT_EQ(
+      layout.tensor_layout(/*layer_id=*/0, /*role=*/KVCacheTensorRole::KEY)
+          .bank,
+      0u);
+  EXPECT_EQ(
+      layout.tensor_layout(/*layer_id=*/3, /*role=*/KVCacheTensorRole::KEY)
+          .bank,
+      1u);
+  EXPECT_EQ(
+      layout.tensor_layout(/*layer_id=*/1, /*role=*/KVCacheTensorRole::CONV)
+          .bank,
+      0u);
+  EXPECT_EQ(
+      layout.tensor_layout(/*layer_id=*/2, /*role=*/KVCacheTensorRole::CONV)
+          .bank,
+      1u);
   EXPECT_EQ(layout.linear_group(2, KVCacheTensorRole::SSM), 3);
   EXPECT_EQ(layout.bytes_used(), 0);
 }
@@ -238,7 +255,7 @@ TEST(StaticKVTensorAllocatorTest, BoundsRealQwen38FinalFiaPagesPerBank) {
   constexpr uint64_t kFiaElementLimit = uint64_t{1} << 32;
   constexpr uint64_t kRowElements = 128 * 2 * 256;
   for (const int32_t id : full) {
-    const int32_t page = pool.final_full_page(id);
+    const int32_t page = final_full_page(pool, id);
     EXPECT_GE(page, 120);
     EXPECT_LT((static_cast<uint64_t>(page) + 1) * kRowElements - 1,
               kFiaElementLimit);
@@ -264,7 +281,7 @@ TEST(StaticKVTensorAllocatorTest, SameFinalPageKeepsAllLayerPayloadsSeparate) {
   StaticKVBlockPool pool(/*logical_capacity=*/64, layout);
   const auto full = pool.allocate(/*num_blocks=*/2, BlockType::KV);
   ASSERT_EQ(full.size(), 2);
-  const int32_t page = pool.final_full_page(full.front());
+  const int32_t page = final_full_page(pool, full.front());
   struct ByteExtent {
     const uint8_t* begin;
     const uint8_t* end;
@@ -309,7 +326,7 @@ TEST(StaticKVTensorAllocatorTest, FreeGroupsReuseFullConvAndSsmBytes) {
   std::vector<const uint8_t*> previous_pairs;
   previous_pairs.reserve(original.size() * views.keys.size());
   for (const int32_t id : original) {
-    const int32_t page = pool.final_full_page(id);
+    const int32_t page = final_full_page(pool, id);
     for (const torch::Tensor& key : views.keys) {
       previous_pairs.emplace_back(
           static_cast<const uint8_t*>(key[page].data_ptr()));
@@ -341,7 +358,7 @@ TEST(StaticKVTensorAllocatorTest, FreeGroupsReuseFullConvAndSsmBytes) {
   }
   const auto live = pool.allocate(/*num_blocks=*/1, BlockType::KV);
   ASSERT_EQ(live.size(), 1);
-  const int32_t live_page = pool.final_full_page(live.front());
+  const int32_t live_page = final_full_page(pool, live.front());
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
     views.keys[layer][live_page].fill_(31);
     views.values[layer][live_page].fill_(37);
@@ -352,7 +369,7 @@ TEST(StaticKVTensorAllocatorTest, FreeGroupsReuseFullConvAndSsmBytes) {
   const FullPublication publication = full_publication(pool, layout, reused);
   allocator.initialize_full_blocks(publication.rows, publication.epochs);
   for (const int32_t id : reused) {
-    const int32_t page = pool.final_full_page(id);
+    const int32_t page = final_full_page(pool, id);
     for (size_t layer = 0; layer < views.keys.size(); ++layer) {
       EXPECT_TRUE(views.keys[layer][page].eq(0).all().item<bool>());
       EXPECT_TRUE(views.values[layer][page].eq(0).all().item<bool>());
@@ -377,8 +394,8 @@ TEST(StaticKVTensorAllocatorTest,
   const auto linear = pool.allocate(/*num_blocks=*/1, BlockType::LINEAR);
   ASSERT_EQ(full.size(), 2);
   ASSERT_EQ(linear.size(), 1);
-  const int32_t renewed_page = pool.final_full_page(full[0]);
-  const int32_t prefix_page = pool.final_full_page(full[1]);
+  const int32_t renewed_page = final_full_page(pool, full[0]);
+  const int32_t prefix_page = final_full_page(pool, full[1]);
   const FullPublication initial = full_publication(pool, layout, full);
   allocator.initialize_full_blocks(initial.rows, initial.epochs);
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
@@ -401,7 +418,7 @@ TEST(StaticKVTensorAllocatorTest,
   const auto renewed = pool.allocate(/*num_blocks=*/1, BlockType::KV);
   ASSERT_EQ(renewed.size(), 1);
   ASSERT_EQ(renewed.front(), full[0]);
-  ASSERT_EQ(pool.final_full_page(renewed.front()), renewed_page);
+  ASSERT_EQ(final_full_page(pool, renewed.front()), renewed_page);
   const FullPublication publication = full_publication(pool, layout, renewed);
   EXPECT_GT(publication.epochs.front(), initial.epochs.front());
   EXPECT_TRUE(allocator.needs_full_block_initialization(publication.rows,
@@ -442,14 +459,14 @@ TEST(StaticKVTensorAllocatorTest,
   ASSERT_EQ(original.size(), 1);
   const FullPublication initial = full_publication(pool, layout, original);
   allocator.initialize_full_blocks(initial.rows, initial.epochs);
-  const int32_t old_page = pool.final_full_page(original.front());
+  const int32_t old_page = final_full_page(pool, original.front());
   pool.release(original.front(), BlockType::KV);
   const auto linear = pool.allocate(/*num_blocks=*/1, BlockType::LINEAR);
   ASSERT_EQ(linear.size(), 1);
   const auto renewed = pool.allocate(/*num_blocks=*/1, BlockType::KV);
   ASSERT_EQ(renewed.size(), 1);
   ASSERT_EQ(renewed.front(), original.front());
-  const int32_t new_page = pool.final_full_page(renewed.front());
+  const int32_t new_page = final_full_page(pool, renewed.front());
   ASSERT_NE(new_page, old_page);
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
     views.keys[layer][new_page].fill_(std::numeric_limits<float>::quiet_NaN());
@@ -486,9 +503,9 @@ TEST(StaticKVTensorAllocatorTest,
       full_publication(pool, layout, prefix);
   allocator.initialize_full_blocks(prefix_publication.rows,
                                    prefix_publication.epochs);
-  const int32_t first_page = pool.final_full_page(first.front());
-  const int32_t prefix_page = pool.final_full_page(prefix.front());
-  const int32_t last_page = pool.final_full_page(last.front());
+  const int32_t first_page = final_full_page(pool, first.front());
+  const int32_t prefix_page = final_full_page(pool, prefix.front());
+  const int32_t last_page = final_full_page(pool, last.front());
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
     for (const int32_t page : {first_page, last_page}) {
       views.keys[layer][page].fill_(std::numeric_limits<float>::quiet_NaN());
@@ -532,10 +549,8 @@ TEST(StaticKVTensorAllocatorTest, ReadPaddingSurvivesAllWritableScratchRoles) {
   StaticKVTensorAllocator allocator(layout, torch::kCPU);
   const CacheViews views = allocate_views(allocator, spec);
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
-    views.keys[layer][layout.scratch_full_page()].fill_(
-        std::numeric_limits<float>::quiet_NaN());
-    views.values[layer][layout.scratch_full_page()].fill_(
-        std::numeric_limits<float>::quiet_NaN());
+    views.keys[layer][0].fill_(std::numeric_limits<float>::quiet_NaN());
+    views.values[layer][0].fill_(std::numeric_limits<float>::quiet_NaN());
   }
   for (size_t layer = 0; layer < views.conv.size(); ++layer) {
     views.conv[layer][0].fill_(std::numeric_limits<float>::quiet_NaN());
@@ -587,8 +602,8 @@ TEST(StaticKVTensorAllocatorTest,
   StaticKVBlockPool pool(/*logical_capacity=*/64, layout);
   const auto blocks = pool.allocate(/*num_blocks=*/2, BlockType::KV);
   ASSERT_EQ(blocks.size(), 2u);
-  const int32_t page = pool.final_full_page(blocks[0]);
-  const int32_t prefix_page = pool.final_full_page(blocks[1]);
+  const int32_t page = final_full_page(pool, blocks[0]);
+  const int32_t prefix_page = final_full_page(pool, blocks[1]);
   const FullPublication publication = full_publication(pool, layout, blocks);
   arena->initialize_full_blocks(publication.rows, publication.epochs);
   target.keys.front()[page].fill_(17);
@@ -608,7 +623,7 @@ TEST(StaticKVTensorAllocatorTest,
   pool.release(blocks[0], BlockType::KV);
   const auto renewed = pool.allocate(/*num_blocks=*/1, BlockType::KV);
   ASSERT_EQ(renewed.size(), 1u);
-  ASSERT_EQ(pool.final_full_page(renewed.front()), page);
+  ASSERT_EQ(final_full_page(pool, renewed.front()), page);
   const FullPublication next = full_publication(pool, layout, renewed);
   arena->initialize_full_blocks(next.rows, next.epochs);
   EXPECT_TRUE(target.keys.front()[page].eq(0).all().item<bool>());

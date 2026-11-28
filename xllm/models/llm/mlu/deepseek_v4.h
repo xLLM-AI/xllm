@@ -333,22 +333,6 @@ class DeepseekV4ForCausalLMImpl final
   explicit DeepseekV4ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<DeepseekV4Model>(context) {}
 
-  bool requires_graph_forward_metadata() {
-    return this->model_->requires_graph_forward_metadata();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState>
-  create_graph_forward_metadata_state() {
-    return this->model_->create_graph_forward_metadata_state();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& input_params) {
-    this->model_->prepare_graph_forward_metadata(
-        state, positions, input_params);
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
     for (const std::unique_ptr<StateDict>& state_dict :

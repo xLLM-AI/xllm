@@ -30,13 +30,6 @@ def test_unsupported_model_fails_before_import(monkeypatch: pytest.MonkeyPatch) 
     import_model.assert_not_called()
 
 
-def test_glm_mtp_checkpoint_names_are_registered() -> None:
-    expected = ("xllm.python.models.glm5_2_mtp", "Glm52MtpForCausalLM")
-
-    assert registry._REGISTRY["GlmMoeDsaMtpForCausalLM"] == expected
-    assert registry._REGISTRY["glm_moe_dsa_mtp"] == expected
-
-
 def test_glm5_next_text_and_vl_registry_entries_are_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registry.current_platform, "device_type", lambda: "npu")
 

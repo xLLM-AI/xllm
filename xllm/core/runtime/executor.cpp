@@ -16,16 +16,18 @@ limitations under the License.
 #include "executor.h"
 
 #include "core/framework/config/model_config.h"
+#include "core/framework/model/causal_vlm.h"
 #include "executor_impl_factory.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 
 namespace xllm {
 
-Executor::Executor(CausalLM* model,
+Executor::Executor(ExecutorImplFactory::ModelRef model,
                    const ModelContext& context,
                    const runtime::Options& options) {
-  std::string executor_type = model->executor_type();
+  std::string executor_type = std::visit(
+      [](auto* typed_model) { return typed_model->executor_type(); }, model);
   if (executor_type.empty()) {
     if (ModelConfig::is_python_model_impl(context.get_model_impl())) {
       executor_type = "python";

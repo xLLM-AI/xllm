@@ -21,7 +21,9 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
+#include <variant>
 
 #include "core/common/macros.h"
 #include "core/framework/model/causal_lm.h"
@@ -30,27 +32,30 @@ limitations under the License.
 
 namespace xllm {
 
+class CausalVLM;
+
 class ExecutorImplFactory {
  public:
-  using Creator =
+  using ModelRef = std::variant<CausalLM*, CausalVLM*>;
+  using Creator = std::variant<
       std::function<std::unique_ptr<ExecutorImpl>(CausalLM*,
                                                   const ModelArgs&,
                                                   const torch::Device&,
-                                                  const runtime::Options&)>;
+                                                  const runtime::Options&)>,
+      std::function<std::unique_ptr<ExecutorImpl>(CausalVLM*,
+                                                  const ModelArgs&,
+                                                  const torch::Device&,
+                                                  const runtime::Options&)>>;
 
   static ExecutorImplFactory& get_instance();
 
-  bool register_creator(const std::string& executor_type, Creator creator);
-  bool register_creator(const std::string& executor_type,
-                        Creator creator,
-                        int32_t priority);
   bool register_creator(std::string executor_type,
                         std::string extension_impl,
                         Creator creator,
                         int32_t priority = 0);
 
   std::unique_ptr<ExecutorImpl> create_executor_impl(
-      CausalLM* model,
+      ModelRef model,
       const ModelArgs& args,
       const torch::Device& device,
       const runtime::Options& options,
@@ -83,10 +88,18 @@ class ExecutorImplFactory {
   namespace {                                                                \
   const bool CONCAT_EXECUTOR(xllm_executor_registration_,                    \
                              __COUNTER__) = []() -> bool {                   \
+    using ModelType = std::conditional_t<                                    \
+        std::is_constructible_v<class_type,                                  \
+                                ::xllm::CausalLM*,                           \
+                                const ::xllm::ModelArgs&,                    \
+                                const torch::Device&,                        \
+                                const ::xllm::runtime::Options&>,            \
+        ::xllm::CausalLM,                                                    \
+        ::xllm::CausalVLM>;                                                  \
     return ::xllm::ExecutorImplFactory::get_instance().register_creator(     \
         executor_type,                                                       \
         extension_impl,                                                      \
-        [](::xllm::CausalLM* model,                                          \
+        [](ModelType* model,                                                 \
            const ::xllm::ModelArgs& args,                                    \
            const torch::Device& device,                                      \
            const ::xllm::runtime::Options& options)                          \

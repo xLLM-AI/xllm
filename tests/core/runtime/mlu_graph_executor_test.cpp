@@ -113,8 +113,10 @@ TEST(MluGraphCapacityTest, DraftRowsCoverIntermediateTpAlignedPrefixes) {
 
 }  // namespace
 
-class MockCausalLM : public CausalLM {
+class MockCausalLM : public CausalLM, public DecoderModel {
  public:
+  DecoderModel& model() override { return *this; }
+
   MockCausalLM(const torch::TensorOptions& options) : options_(options) {
     auto weight = torch::randn({1024, 1024}, options_) * 0.02;
     weight_ = register_parameter("weight", weight, false);

@@ -34,46 +34,10 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-CausalLMFactory unused_lm_factory() {
+ModelFactory unused_lm_factory() {
   return [](const ModelContext& /*context*/) -> std::unique_ptr<CausalLM> {
     return nullptr;
   };
-}
-
-CausalVLMFactory unused_vlm_factory() {
-  return [](const ModelContext& /*context*/) -> std::unique_ptr<CausalVLM> {
-    return nullptr;
-  };
-}
-
-TEST(ModelRegistryTest, PythonModelMetadataRetainsBackendDiscovery) {
-  EXPECT_EQ(ModelRegistry::get_model_backend("deepseek_v32"), "llm");
-  EXPECT_EQ(ModelRegistry::get_model_backend("glm_moe_dsa"), "llm");
-  EXPECT_EQ(ModelRegistry::get_model_backend("glm4v"), "vlm");
-  EXPECT_EQ(ModelRegistry::get_model_backend("kimi_k25"), "vlm");
-}
-
-TEST(ModelRegistryTest, DeepseekV4DSparkUsesTorchBackend) {
-  std::string effective_backend;
-  std::string resolved_name;
-  std::string error_message;
-
-  EXPECT_TRUE(resolve_model_registration("deepseek_v4_dspark",
-                                         "AUTO",
-                                         &effective_backend,
-                                         &resolved_name,
-                                         &error_message));
-  EXPECT_EQ(effective_backend, "TORCH");
-  EXPECT_EQ(resolved_name, "deepseek_v4_dspark");
-  EXPECT_TRUE(error_message.empty());
-
-  EXPECT_TRUE(resolve_model_registration("deepseek_v4_dspark",
-                                         "TORCH",
-                                         &effective_backend,
-                                         &resolved_name,
-                                         &error_message));
-  EXPECT_EQ(effective_backend, "TORCH");
-  EXPECT_EQ(resolved_name, "deepseek_v4_dspark");
 }
 
 TEST(ModelRegistryTest, ExtensionModelUsesTorchRouting) {
@@ -89,29 +53,6 @@ TEST(ModelRegistryTest, ExtensionModelUsesTorchRouting) {
   EXPECT_EQ(effective_backend, "TORCH");
   EXPECT_EQ(resolved_name, "extension_model");
   EXPECT_TRUE(error_message.empty());
-}
-
-TEST(ModelRegistryTest, GlmMoeDsaMtpUsesTorchBackend) {
-  std::string effective_backend;
-  std::string resolved_name;
-  std::string error_message;
-
-  EXPECT_TRUE(resolve_model_registration("glm_moe_dsa_mtp",
-                                         "AUTO",
-                                         &effective_backend,
-                                         &resolved_name,
-                                         &error_message));
-  EXPECT_EQ(effective_backend, "TORCH");
-  EXPECT_EQ(resolved_name, "glm_moe_dsa_mtp");
-  EXPECT_TRUE(error_message.empty());
-
-  EXPECT_TRUE(resolve_model_registration("glm_moe_dsa_mtp",
-                                         "TORCH",
-                                         &effective_backend,
-                                         &resolved_name,
-                                         &error_message));
-  EXPECT_EQ(effective_backend, "TORCH");
-  EXPECT_EQ(resolved_name, "glm_moe_dsa_mtp");
 }
 
 TEST(ModelRegistryTest, NpuResolutionUsesEachInstanceExtensionSelection) {
@@ -144,7 +85,7 @@ TEST(ModelRegistryTest, NpuResolutionUsesEachInstanceExtensionSelection) {
   model_config.model_impl("");
 
   const std::string family = "npu_public_options_custom";
-  ASSERT_TRUE(ModelRegistry::register_causallm_factory(
+  ASSERT_TRUE(ModelRegistry::register_model_factory(
       "qwen2", family, unused_lm_factory()));
 
   Options selected_options;
@@ -154,9 +95,8 @@ TEST(ModelRegistryTest, NpuResolutionUsesEachInstanceExtensionSelection) {
   Options builtin_options;
   builtin_options.model_path(model_path.string()).backend("llm");
 
-  resolve_npu_kernel_backend(&selected_options,
-                             /*model_component=*/"causal_lm");
-  resolve_npu_kernel_backend(&builtin_options, /*model_component=*/"causal_lm");
+  resolve_npu_kernel_backend(selected_options);
+  resolve_npu_kernel_backend(builtin_options);
 
   EXPECT_EQ(selected_options.npu_kernel_backend(), "TORCH");
   EXPECT_EQ(builtin_options.npu_kernel_backend(), "TORCH");
@@ -167,7 +107,7 @@ TEST(ModelRegistryTest, NpuResolutionUsesEachInstanceExtensionSelection) {
 
 TEST(ModelRegistryTest, SelectedLlmExtensionResolvesBeforeBuiltinBackendRules) {
   const std::string family = "npu_backend_lm_custom";
-  ASSERT_TRUE(ModelRegistry::register_causallm_factory(
+  ASSERT_TRUE(ModelRegistry::register_model_factory(
       "qwen2", family, unused_lm_factory()));
   std::string effective_backend;
   std::string resolved_name;
@@ -176,7 +116,6 @@ TEST(ModelRegistryTest, SelectedLlmExtensionResolvesBeforeBuiltinBackendRules) {
   EXPECT_TRUE(resolve_model_registration("qwen2",
                                          "AUTO",
                                          family,
-                                         "causal_lm",
                                          &effective_backend,
                                          &resolved_name,
                                          &error_message));
@@ -187,41 +126,11 @@ TEST(ModelRegistryTest, SelectedLlmExtensionResolvesBeforeBuiltinBackendRules) {
   EXPECT_TRUE(resolve_model_registration("qwen2",
                                          "TORCH",
                                          family,
-                                         "causal_lm",
                                          &effective_backend,
                                          &resolved_name,
                                          &error_message));
   EXPECT_EQ(effective_backend, "TORCH");
   EXPECT_EQ(resolved_name, "qwen2");
-}
-
-TEST(ModelRegistryTest, SelectedVlmExtensionResolvesBeforeBuiltinBackendRules) {
-  const std::string family = "npu_backend_vlm_custom";
-  ASSERT_TRUE(ModelRegistry::register_causalvlm_factory(
-      "qwen2_5_vl", family, unused_vlm_factory()));
-  std::string effective_backend;
-  std::string resolved_name;
-  std::string error_message;
-
-  EXPECT_TRUE(resolve_model_registration("qwen2_5_vl",
-                                         "AUTO",
-                                         family,
-                                         "causal_vlm",
-                                         &effective_backend,
-                                         &resolved_name,
-                                         &error_message));
-  EXPECT_EQ(effective_backend, "TORCH");
-  EXPECT_EQ(resolved_name, "qwen2_5_vl");
-
-  EXPECT_TRUE(resolve_model_registration("qwen2_5_vl",
-                                         "TORCH",
-                                         family,
-                                         "causal_vlm",
-                                         &effective_backend,
-                                         &resolved_name,
-                                         &error_message));
-  EXPECT_EQ(effective_backend, "TORCH");
-  EXPECT_EQ(resolved_name, "qwen2_5_vl");
 }
 
 TEST(ModelRegistryTest, ExecutorOnlyFamilyRetainsBuiltinBackendRules) {
@@ -231,37 +140,18 @@ TEST(ModelRegistryTest, ExecutorOnlyFamilyRetainsBuiltinBackendRules) {
   std::string resolved_name;
   std::string error_message;
 
-  EXPECT_TRUE(resolve_model_registration("qwen2",
-                                         "AUTO",
-                                         family,
-                                         "causal_lm",
-                                         &effective_backend,
-                                         &resolved_name));
+  EXPECT_TRUE(resolve_model_registration(
+      /*model_type=*/"qwen2",
+      /*requested_npu_kernel_backend=*/"AUTO",
+      family,
+      &effective_backend,
+      &resolved_name));
   EXPECT_EQ(effective_backend, "TORCH");
   EXPECT_EQ(resolved_name, "qwen2");
 
   EXPECT_TRUE(resolve_model_registration("qwen2",
                                          "TORCH",
                                          family,
-                                         "causal_lm",
-                                         &effective_backend,
-                                         &resolved_name,
-                                         &error_message));
-  EXPECT_TRUE(error_message.empty());
-}
-
-TEST(ModelRegistryTest, ExtensionBackendSelectionIsSpecificToModelComponent) {
-  const std::string family = "npu_backend_other_component_custom";
-  ASSERT_TRUE(ModelRegistry::register_causalvlm_factory(
-      "qwen2", family, unused_vlm_factory()));
-  std::string effective_backend;
-  std::string resolved_name;
-  std::string error_message;
-
-  EXPECT_TRUE(resolve_model_registration("qwen2",
-                                         "TORCH",
-                                         family,
-                                         "causal_lm",
                                          &effective_backend,
                                          &resolved_name,
                                          &error_message));
@@ -270,7 +160,7 @@ TEST(ModelRegistryTest, ExtensionBackendSelectionIsSpecificToModelComponent) {
 
 TEST(ModelRegistryTest, SelectedModelFamilyRequiresRequestedType) {
   const std::string family = "npu_backend_missing_model_custom";
-  ASSERT_TRUE(ModelRegistry::register_causallm_factory(
+  ASSERT_TRUE(ModelRegistry::register_model_factory(
       "npu_backend_other_model", family, unused_lm_factory()));
   std::string effective_backend;
   std::string resolved_name;
@@ -279,7 +169,6 @@ TEST(ModelRegistryTest, SelectedModelFamilyRequiresRequestedType) {
   EXPECT_FALSE(resolve_model_registration("qwen2",
                                           "AUTO",
                                           family,
-                                          "causal_lm",
                                           &effective_backend,
                                           &resolved_name,
                                           &error_message));
@@ -291,7 +180,7 @@ TEST(ModelRegistryTest, SelectedModelFamilyRequiresRequestedType) {
 
 TEST(ModelRegistryTest, SelectedExtensionStillValidatesBackend) {
   const std::string family = "npu_backend_validation_custom";
-  ASSERT_TRUE(ModelRegistry::register_causallm_factory(
+  ASSERT_TRUE(ModelRegistry::register_model_factory(
       "qwen2", family, unused_lm_factory()));
   std::string effective_backend;
   std::string resolved_name;
@@ -300,7 +189,6 @@ TEST(ModelRegistryTest, SelectedExtensionStillValidatesBackend) {
   EXPECT_FALSE(resolve_model_registration("qwen2",
                                           "INVALID",
                                           family,
-                                          "causal_lm",
                                           &effective_backend,
                                           &resolved_name,
                                           &error_message));
@@ -317,7 +205,6 @@ TEST(ModelRegistryTest, UnknownExtensionFamilyCannotBypassBackendRules) {
   EXPECT_FALSE(resolve_model_registration("qwen2",
                                           "TORCH",
                                           "npu_backend_unknown_custom",
-                                          "causal_lm",
                                           &effective_backend,
                                           &resolved_name,
                                           &error_message));

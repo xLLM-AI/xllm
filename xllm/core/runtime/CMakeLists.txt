@@ -25,6 +25,7 @@ cc_library(
   HDRS
     options.h
     forward_params.h
+    vlm_forward_params.h
     forward_runtime_state.h
     dit_forward_params.h
     vlm_forward_params.h
@@ -68,6 +69,8 @@ cc_library(
     dspark_worker_impl.h
     worker_rendezvous.h
   SRCS
+    graph_execution_input.cpp
+    vlm_forward_params.cpp
     executor.cpp
     json_object_decode_adapter.cpp
     schedule_overlap.cpp
@@ -96,7 +99,6 @@ cc_library(
     mm_embed_vlm_worker_impl.cpp
     worker_client.cpp
     dit_forward_params.cpp
-    vlm_forward_params.cpp
     draft_model_spec_worker_impl.cpp
     speculative_worker_impl.cpp
     mtp_worker_impl.cpp

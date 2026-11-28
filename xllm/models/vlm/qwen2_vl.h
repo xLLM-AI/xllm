@@ -17,7 +17,7 @@ limitations under the License.
 
 #include "core/framework/model/model_output.h"
 #include "core/framework/multimodal/mposition.h"
-#include "core/layers/common/lm_head.h"
+#include "core/framework/multimodal/multimodal_utils.h"
 #include "core/layers/qwen2_decoder_layer.h"
 #include "core/layers/qwen2_vision_layer.h"
 #include "models/llm/qwen2.h"
@@ -324,7 +324,9 @@ TORCH_MODULE(Qwen2_VisionTransformer);
 class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
  public:
   Qwen2_VLForConditionalGenerationImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : image_merge_size_(context.get_model_args().mm_image_merge_size()),
+        encoder_embedding_mode_(
+            context.get_model_args().encoder_embedding_mode()),
         options_(context.get_tensor_options()) {
     visual_ = register_module("visual", Qwen2_VisionTransformer(context));
 
@@ -343,7 +345,7 @@ class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
     }
 
     auto image_embeds = visual_(pixel_values.to(options_), image_grid_thw);
-    const int32_t merge_size = model_args_.mm_image_merge_size();
+    const int32_t merge_size = image_merge_size_;
     auto image_tokens =
         (image_grid_thw.prod(/*dim=*/-1) / merge_size / merge_size)
             .cpu()
@@ -360,61 +362,31 @@ class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
 
   torch::Tensor get_input_embeddings(const torch::Tensor input_ids,
                                      const ModelParamsView& input_params) {
-    const auto& mm_data = input_params.multimodal().mm_data;
-    auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
-    auto merge_modality = [&](const std::string& embed_key,
-                              const std::string& mask_key) {
-      auto emb = mm_data.get<torch::Tensor>(embed_key);
-      if (!emb.has_value()) return;
-      auto mask = mm_data.get<torch::Tensor>(mask_key);
-      if (!mask.has_value()) return;
-      inputs_embeds.index_put_({*mask}, *emb);
-    };
-
-    merge_modality("image|embedding", "image|mask");
-    merge_modality("video|embedding", "video|mask");
-
-    return inputs_embeds;
-  }
-
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return language_model_->forward(tokens, positions, kv_caches, input_params);
+    return merge_multimodal_embeddings(
+        language_model_->get_input_embeddings(input_ids),
+        input_params.multimodal().mm_data);
   }
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    namespace F = torch::nn::functional;
-    return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));
+    return torch::nn::functional::normalize(
+        language_model_->pooler(hidden_states, seleted_idxes));
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
+  const QWen2ForCausalLM& language_model() const { return language_model_; }
 
   void load_model(std::unique_ptr<ModelLoader> loader) {
     for (const auto& state_dict : loader->get_state_dicts()) {
       visual_->load_state_dict(state_dict->get_dict_with_prefix("visual."));
     }
-    if (!model_args_.encoder_embedding_mode()) {
+    if (!encoder_embedding_mode_) {
       language_model_->load_model(std::move(loader));
     }
   }
 
-  layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  layer::WordEmbedding get_word_embedding() {
-    return language_model_->get_word_embedding();
-  }
-
  private:
-  ModelArgs model_args_;
+  int image_merge_size_;
+  bool encoder_embedding_mode_;
   torch::TensorOptions options_;
 
   Qwen2_VisionTransformer visual_{nullptr};
@@ -425,8 +397,11 @@ TORCH_MODULE(Qwen2_VLForConditionalGeneration);
 using Qwen2VLMultimodalProcessor = MultimodalProcessor<Qwen2VLPromptProcessor,
                                                        Qwen2VLImageProcessor,
                                                        Qwen2VLVideoProcessor>;
-REGISTER_MULTIMODAL_PROCESSOR(qwen2_vl, Qwen2VLMultimodalProcessor);
-REGISTER_CAUSAL_VLM_MODEL(qwen2_vl, Qwen2_VLForConditionalGeneration);
+REGISTER_CAUSAL_MODEL(
+    qwen2_vl,
+    Qwen2_VLForConditionalGeneration,
+    /*priority=*/0,
+    ModelRegistry::make_multimodal_processor<Qwen2VLMultimodalProcessor>);
 REGISTER_MPOSITION_GENERATOR(qwen2_vl, QwenVLMPositionGenerator);
 
 REGISTER_MODEL_ARGS(qwen2_vl, [&] {

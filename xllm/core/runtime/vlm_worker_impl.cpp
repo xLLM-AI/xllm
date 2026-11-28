@@ -55,13 +55,8 @@ VLMWorkerImpl::VLMWorkerImpl(const ParallelArgs& parallel_args,
 }
 
 bool VLMWorkerImpl::init_model(ModelContext& context) {
-  CHECK(model_ == nullptr) << "Model is already initialized.";
-
-  // initialize model
   context.set_encoder_embedding_mode(false);
-  model_ = create_vlm_model(context);
-  CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
+  WorkerImpl::init_model(context);
   model_executor_->set_dp_process_group(
       context.get_parallel_args().dp_local_process_group_);
   return true;
@@ -153,12 +148,12 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
 
   if (sampling_params.num_sample_seqs() > 0) {
     if (options_.enable_speculative_decode()) {
-      logits = model_->logits(model_output.hidden_states,
-                              lm_head_input_indices,
-                              selected_hidden_from_lm_head);
+      logits = language_model_->logits(model_output.hidden_states,
+                                       lm_head_input_indices,
+                                       selected_hidden_from_lm_head);
     } else {
-      logits =
-          model_->logits(model_output.hidden_states, lm_head_input_indices);
+      logits = language_model_->logits(model_output.hidden_states,
+                                       lm_head_input_indices);
     }
   }
 

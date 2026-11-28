@@ -144,8 +144,10 @@ class RecordingTransferWorker final : public LLMWorkerImpl {
   uint32_t prefetch_count_ = 0;
 };
 
-class CacheAllocationModel final : public CausalLM {
+class CacheAllocationModel final : public CausalLM, public DecoderModel {
  public:
+  DecoderModel& model() override { return *this; }
+
   explicit CacheAllocationModel(torch::TensorOptions options)
       : options_(std::move(options)) {}
 

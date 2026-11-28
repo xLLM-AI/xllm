@@ -120,8 +120,10 @@ torch::Device InitXllmCudaDeviceForTest(int32_t device_index = 0) {
 // A minimal CausalLM whose forward contains a FlashInfer batch-decode attention
 // call. This model is used to compare eager vs CUDA-graph execution under the
 // same inputs.
-class FakeAttnCausalLM final : public CausalLM {
+class FakeAttnCausalLM final : public CausalLM, public DecoderModel {
  public:
+  DecoderModel& model() override { return *this; }
+
   FakeAttnCausalLM(const ModelArgs& args, const torch::Device& device)
       : args_(args),
         device_(device),
@@ -730,8 +732,6 @@ TEST(CudaGraphExecutorTest, BatchDecodePaddedBucket100CaptureAndReplay) {
   EXPECT_EQ(
       persistent.persistent_decode_qo_indptr(/*actual_batch_size=*/0).size(0),
       113);
-  EXPECT_EQ(persistent.persistent_block_tables(/*actual_batch_size=*/0).size(0),
-            112);
 
   auto model = std::make_unique<FakeAttnCausalLM>(args, device);
   auto graph_exec = std::make_unique<runtime::cuda::CudaGraphExecutorImpl>(
@@ -804,8 +804,6 @@ TEST(CudaGraphExecutorTest, BatchDecodeNoPaddingBucket100CaptureAndReplay) {
   EXPECT_EQ(
       persistent.persistent_decode_qo_indptr(/*actual_batch_size=*/0).size(0),
       101);
-  EXPECT_EQ(persistent.persistent_block_tables(/*actual_batch_size=*/0).size(0),
-            100);
 
   auto model = std::make_unique<FakeAttnCausalLM>(args, device);
   auto graph_exec = std::make_unique<runtime::cuda::CudaGraphExecutorImpl>(

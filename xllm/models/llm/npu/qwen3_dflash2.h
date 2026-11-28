@@ -211,7 +211,8 @@ class DFlash2Qwen3ModelImpl final
   explicit DFlash2Qwen3ModelImpl(const ModelContext& context)
       : Base(context.get_model_args()),
         parallel_args_(context.get_parallel_args()),
-        num_speculative_tokens_(context.num_speculative_tokens()) {
+        num_speculative_tokens_(context.num_speculative_tokens()),
+        selector_(context.get_model_args(), context.get_tensor_options()) {
     const ModelArgs& args = context.get_model_args();
     norm_ = register_module(/*name=*/"norm", layer::RMSNorm(context));
     layers_.reserve(args.n_layers());
@@ -315,9 +316,12 @@ class DFlash2Qwen3ModelImpl final
       layers_[i]->load_state_dict(layer_dict);
     }
     norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
+    selector_.load_state_dict(
+        state_dict.get_dict_with_prefix(/*prefix=*/"candidate_selector."));
   }
 
   void finalize_loaded_weights() {
+    selector_.verify_loaded_weights();
     fc_->verify_loaded_weights("fc.");
     hidden_norm_->verify_loaded_weights("hidden_norm.");
     norm_->verify_loaded_weights("norm.");
@@ -344,6 +348,13 @@ class DFlash2Qwen3ModelImpl final
     per_layer_k_proj_.clear();
     per_layer_v_proj_.clear();
     per_layer_k_norm_.clear();
+  }
+
+  DFlash2CandidateOutput dflash2_candidates(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& unary_logits,
+      const torch::Tensor& anchor_token_ids) {
+    return selector_.forward(hidden_states, unary_logits, anchor_token_ids);
   }
 
   ModelOutput write_context_kv(const torch::Tensor& target_hidden,
@@ -423,6 +434,7 @@ class DFlash2Qwen3ModelImpl final
   double rms_norm_eps_ = 1e-6;
   int32_t sliding_window_ = -1;
   int32_t num_speculative_tokens_ = 0;
+  DFlash2CandidateSelector selector_;
 };
 TORCH_MODULE(DFlash2Qwen3Model);
 
@@ -432,40 +444,16 @@ class DFlash2Qwen3ForCausalLMImpl final
   using Base = ::xllm::LlmForCausalLMImplBase<DFlash2Qwen3Model>;
 
   explicit DFlash2Qwen3ForCausalLMImpl(const ModelContext& context)
-      : Base(context, /*share_lm_head=*/true),
-        selector_(context.get_model_args(), context.get_tensor_options()) {}
+      : Base(context, /*share_lm_head=*/true) {}
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "") override {
     for (const std::unique_ptr<StateDict>& state_dict :
          loader->get_state_dicts()) {
-      const auto weights = state_dict->get_dict_with_prefix(prefix);
-      model_->load_state_dict(weights);
-      selector_.load_state_dict(
-          weights.get_dict_with_prefix(/*prefix=*/"candidate_selector."));
+      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
     }
-    selector_.verify_loaded_weights();
     model_->finalize_loaded_weights();
   }
-
-  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
-                               const torch::Tensor& positions,
-                               const torch::Tensor& device_cache_slots,
-                               std::vector<KVCache>& kv_caches,
-                               const ModelParamsView& input_params) {
-    return model_->write_context_kv(
-        target_hidden, positions, device_cache_slots, kv_caches, input_params);
-  }
-
-  DFlash2CandidateOutput dflash2_candidates(
-      const torch::Tensor& hidden_states,
-      const torch::Tensor& unary_logits,
-      const torch::Tensor& anchor_token_ids) {
-    return selector_.forward(hidden_states, unary_logits, anchor_token_ids);
-  }
-
- private:
-  DFlash2CandidateSelector selector_;
 };
 TORCH_MODULE(DFlash2Qwen3ForCausalLM);
 

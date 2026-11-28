@@ -592,11 +592,12 @@ std::vector<std::string> DFlashWorkerImpl::write_context_kv(
 
   ModelParamsView execution_params(input.input_params);
   ModelOutput scatter_output =
-      draft_impl_->get_causal_lm()->write_context_kv(context_hidden,
-                                                     positions_device,
-                                                     new_cache_slots_device,
-                                                     draft_impl_->kv_caches(),
-                                                     execution_params);
+      draft_impl_->get_causal_lm()->model().write_context_kv(
+          context_hidden,
+          positions_device,
+          new_cache_slots_device,
+          draft_impl_->kv_caches(),
+          execution_params);
   // Model returns an empty ModelOutput (hidden_states undefined) when the
   // per-layer NPULayerSynchronizer::record_event fails mid-scatter under
   // PD-PUSH transfer. Fail fast instead of silently continuing: subsequent

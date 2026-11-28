@@ -37,10 +37,12 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-class EplbLoadTestModel final : public CausalLM {
+class EplbLoadTestModel final : public CausalLM, public DecoderModel {
  public:
   explicit EplbLoadTestModel(const ModelContext& context)
       : options_(context.get_tensor_options()) {}
+
+  DecoderModel& model() override { return *this; }
 
   ModelOutput forward(const torch::Tensor& /*tokens*/,
                       const torch::Tensor& /*positions*/,
@@ -60,29 +62,17 @@ class EplbLoadTestModel final : public CausalLM {
 
   const torch::TensorOptions& options() const override { return options_; }
 
-  void prepare_expert_weight(
-      int32_t /*layer_id*/,
-      const std::vector<int32_t>& /*expert_ids*/) override {}
-
-  void update_expert_weight(int32_t /*layer_id*/) override {}
-
  private:
   torch::TensorOptions options_;
 };
+
+REGISTER_CAUSAL_MODEL(eplb_worker_load_test, EplbLoadTestModel);
 
 class EplbInitWorker final : public LLMWorkerImpl {
  public:
   using LLMWorkerImpl::LLMWorkerImpl;
 
   bool initialize_model(int32_t num_speculative_tokens) {
-    constexpr const char* kModelType = "eplb_worker_load_test";
-    static const bool registered = ModelRegistry::register_causallm_factory(
-        kModelType, "native", [](const ModelContext& context) {
-          return std::make_unique<EplbLoadTestModel>(context);
-        });
-    if (!registered) {
-      return false;
-    }
     context_ = make_context(num_speculative_tokens);
     return init_model(context_);
   }

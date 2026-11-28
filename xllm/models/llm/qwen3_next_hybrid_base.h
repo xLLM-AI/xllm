@@ -53,6 +53,7 @@ class Qwen3HybridModelModule : public torch::nn::Module {
                               torch::Tensor positions,
                               std::vector<KVCache>& kv_caches,
                               const ModelParamsView& input_params) = 0;
+  bool is_hybrid_linear_attention() { return true; }
   virtual void load_state_dict(const StateDict& state_dict) = 0;
   virtual void verify_loaded_weights(const std::string& prefix) const = 0;
   virtual layer::WordEmbedding get_word_embedding() = 0;
@@ -364,8 +365,6 @@ class Qwen3HybridForCausalLMImplBase
     }
     model_->verify_loaded_weights(model_prefix);
   }
-
-  bool is_hybrid_linear_attention() { return true; }
 };
 
 }  // namespace xllm

@@ -159,6 +159,8 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
                                   bool share_lm_head = false)
       : LlmForCausalLMImplBase(context, LlmModelType(context), share_lm_head) {}
 
+  LlmModelType& model() { return model_; }
+
   layer::LmHead get_lm_head() { return lm_head_; }
 
   torch::Tensor logits(const torch::Tensor& hidden_states,
@@ -198,12 +200,9 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     lm_head_->tie_weights(embedding_weight);
   }
 
-  bool has_own_lm_head() const {
-    return !lm_head_.is_empty() && lm_head_->is_weight_loaded();
-  }
-
   void share_lm_head(layer::LmHead target_head) {
-    if (embedding_mode_ || has_own_lm_head()) {
+    if (embedding_mode_ ||
+        (!lm_head_.is_empty() && lm_head_->is_weight_loaded())) {
       return;
     }
     if (lm_head_.is_empty()) {
@@ -214,7 +213,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   }
 
   torch::Tensor get_input_embeddings(torch::Tensor input_ids) {
-    return get_word_embedding()(input_ids);
+    return model_->get_word_embedding()(input_ids);
   }
 
   virtual torch::Tensor pooler(const torch::Tensor& hidden_states,
@@ -224,24 +223,6 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
       h = h.index_select(/*dim=*/0, seleted_idxes);
     }
     return h;
-  }
-
-  // tokens: [num_tokens]
-  // positions: [num_tokens] token pos in the sequence
-  // returns: [num_tokens, hidden_size]
-  virtual ModelOutput forward(const torch::Tensor& tokens,
-                              const torch::Tensor& positions,
-                              std::vector<KVCache>& kv_caches,
-                              const ModelParamsView& input_params) {
-    return model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
-  template <typename InputParams>
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const InputParams& input_params) {
-    return model_->forward(tokens, positions, kv_caches, input_params);
   }
 
   virtual void load_model(
@@ -259,17 +240,6 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
                                    "model.",
                                    ""}));
     }
-  }
-
-  virtual void prepare_expert_weight(int32_t, const std::vector<int32_t>&) {}
-  virtual void update_expert_weight(int32_t) {}
-
-  virtual layer::WordEmbedding get_word_embedding() {
-    return model_->get_word_embedding();
-  }
-
-  virtual void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    model_->set_word_embedding(word_embedding);
   }
 
  protected:

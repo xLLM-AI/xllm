@@ -115,8 +115,10 @@ class MirroredDcpProcessGroup final : public ProcessGroup {
 
 }  // namespace
 
-class HybridConv1dMockLM final : public CausalLM {
+class HybridConv1dMockLM final : public CausalLM, public DecoderModel {
  public:
+  DecoderModel& model() override { return *this; }
+
   HybridConv1dMockLM(const ModelArgs& /*args*/,
                      const torch::Device& device,
                      bool enable_fia_decode = true,

@@ -56,15 +56,18 @@ REGISTER_EXECUTOR("llm", "custom", ExampleExecutor, 100);
 原有的 `model_impl` 继续选择模型后端（`native` 或 `python`），不再承担扩展选择职责。
 每个注册表按具体类型和扩展族选择优先级最高的实现，优先级相同时保留最先注册的实现。
 
-模型实现使用相同的注册入口。内置的双参数 `REGISTER_CAUSAL_MODEL` 和
-`REGISTER_CAUSAL_VLM_MODEL` 宏仍用于默认的原生实现注册，扩展可以通过
-`REGISTER_CAUSAL_LM` 或 `REGISTER_CAUSAL_VLM` 注册直接子类：
+内置模型仍通过 `REGISTER_CAUSAL_MODEL` 注册。扩展中的文本和多模态模型统一使用
+`REGISTER_CAUSAL_LM`。下面的 `example_model` 注册多模态模型及其 processor：
 
 ```cpp
 #include "models/model_registry.h"
 
-REGISTER_CAUSAL_LM(example_model, "custom", ExampleCausalLM, 100);
-REGISTER_CAUSAL_VLM(example_vlm, "custom", ExampleCausalVLM, 100);
+REGISTER_CAUSAL_LM(
+    example_model,
+    "custom",
+    ExampleMultimodalModel,
+    100,
+    xllm::ModelRegistry::make_multimodal_processor<ExampleMultimodalProcessor>);
 ```
 
 启动 xLLM 时指定匹配的扩展族，例如 `--extension_impl=custom`。未知扩展族会被拒绝。

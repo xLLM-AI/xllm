@@ -115,4 +115,113 @@ bool VlmForwardInput::to_contiguous_input_buffer(
   return true;
 }
 
+namespace {
+
+void clear_shared_full_mappings(LlmModelParams& params) {
+  params.attention.host.shared_full_block_table = torch::Tensor();
+  params.attention.host.shared_full_slot_mapping = torch::Tensor();
+  params.attention.device.shared_full_block_table = torch::Tensor();
+  params.attention.device.shared_full_slot_mapping = torch::Tensor();
+}
+
+}  // namespace
+
+LlmForwardInput make_llm_draft_input(const LlmForwardInput& target,
+                                     bool shared_full_cache) {
+  LlmForwardInput draft = target.clone();
+  draft.input_params.clear_linear_attention_state();
+  if (!shared_full_cache) {
+    clear_shared_full_mappings(draft.input_params);
+  }
+  return draft;
+}
+
+LlmForwardInput make_llm_draft_input(const VlmForwardInput& target,
+                                     bool shared_full_cache) {
+  CHECK(!target.runtime.input_host_buffer_has_layout ||
+        target.runtime.device_tensors_ready)
+      << "Cannot create an LLM draft input from an unmaterialized packed VLM "
+         "input.";
+  LlmForwardInput draft;
+  draft.token_ids = target.token_ids;
+  draft.positions = target.positions;
+  draft.token_ids_host = target.token_ids_host;
+  draft.positions_host = target.positions_host;
+  auto& params = draft.input_params;
+  const auto& source = target.input_params;
+  params.meta = source.meta;
+  detail::copy_attention_host_input(source.attention.host,
+                                    params.attention.host);
+  detail::copy_attention_device_input(source.attention.device,
+                                      params.attention.device);
+  if (!shared_full_cache) {
+    clear_shared_full_mappings(params);
+  }
+  params.attention.attention_host_buffer =
+      source.attention.attention_host_buffer;
+  params.attention.attention_device_buffer =
+      source.attention.attention_device_buffer;
+  params.attention.attention_buffer_bytes =
+      source.attention.attention_buffer_bytes;
+  params.attention.attention_buffer_capacity =
+      source.attention.attention_buffer_capacity;
+  params.attention.attention_buffer_owner =
+      source.attention.attention_buffer_owner;
+  params.embedding.input_embedding = source.embedding.input_embedding;
+  params.embedding.embedding_ids = source.embedding.embedding_ids;
+  params.embedding.request_ids = source.embedding.request_ids;
+  params.embedding.extra_token_ids = source.embedding.extra_token_ids;
+  params.embedding.mtp_bootstrap_row_idxes =
+      source.embedding.mtp_bootstrap_row_idxes;
+  params.embedding.mtp_bootstrap_embeddings =
+      source.embedding.mtp_bootstrap_embeddings;
+  params.parallel = source.parallel;
+  params.expert = source.expert;
+  params.graph.attn_mask = source.graph.attn_mask;
+  params.graph.tiling_data = source.graph.tiling_data;
+#if defined(USE_DCU)
+  params.graph.use_dense_flash_attention =
+      source.graph.use_dense_flash_attention;
+#endif
+  params.graph.expanded_kv_seq_lens = source.graph.expanded_kv_seq_lens;
+  params.graph.expanded_block_tables = source.graph.expanded_block_tables;
+  params.graph.expanded_paged_kv_indptr = source.graph.expanded_paged_kv_indptr;
+  params.graph.expanded_paged_kv_indices =
+      source.graph.expanded_paged_kv_indices;
+  params.graph.expanded_paged_kv_last_page_len =
+      source.graph.expanded_paged_kv_last_page_len;
+  params.graph.expanded_tiling_data = source.graph.expanded_tiling_data;
+  params.graph.expanded_kv_seq_lens_vec = source.graph.expanded_kv_seq_lens_vec;
+#if defined(USE_NPU)
+  params.graph.acl_graph_task_update_context =
+      source.graph.acl_graph_task_update_context;
+#endif
+  params.graph.input_tokens_override = source.graph.input_tokens_override;
+  params.graph.spec_verify_draft_token_sources =
+      source.graph.spec_verify_draft_token_sources;
+  params.graph.spec_verify_source_addresses_stable =
+      source.graph.spec_verify_source_addresses_stable;
+  params.graph.spec_verify_static_graph_tasks_prepared =
+      source.graph.spec_verify_static_graph_tasks_prepared;
+  params.multi_block_tables = source.multi_block_tables;
+  params.prefill_without_cache = source.prefill_without_cache;
+  params.num_accepted_tokens = source.num_accepted_tokens;
+  params.mtp_topk_state = source.mtp_topk_state;
+  params.num_accepted_tokens_host = source.num_accepted_tokens_host;
+  params.attn_metadata = source.attn_metadata;
+  params.enable_graph = source.enable_graph;
+  params.clear_linear_attention_state();
+  draft.sampling_params = target.sampling_params;
+  draft.sample_sequence_ids = target.sample_sequence_ids;
+  draft.sample_prior_output_rows = target.sample_prior_output_rows;
+  draft.json_object_states = target.json_object_states;
+  draft.json_object_state_snapshots = target.json_object_state_snapshots;
+  draft.skip_sampling_for_logits_only = target.skip_sampling_for_logits_only;
+  draft.return_selected_hidden = target.return_selected_hidden;
+  draft.transfer_kv_infos = target.transfer_kv_infos;
+  draft.runtime = target.runtime;
+  draft.runtime.input_host_buffer_has_layout = false;
+  return draft;
+}
+
 }  // namespace xllm
