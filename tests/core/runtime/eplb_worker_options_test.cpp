@@ -275,6 +275,66 @@ TEST_F(EplbWorkerOptionsTest,
   }
 }
 
+TEST_F(EplbWorkerOptionsTest, ModelImplementationFollowsTargetAndDraftOptions) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "An accelerator is required for worker construction.";
+  }
+  const torch::Device device(Platform::type_torch(), /*index=*/0);
+  const ParallelArgs parallel_args(/*rank=*/0,
+                                   /*world_size=*/1,
+                                   /*process_group=*/nullptr);
+  for (const std::string implementation : {"native", "python", "py", ""}) {
+    SCOPED_TRACE(implementation);
+    const bool is_python = ModelConfig::is_python_model_impl(implementation);
+    ModelConfig::get_instance().model_impl(is_python ? "native" : "python");
+    runtime::Options target_options;
+    target_options.backend("llm").model_impl(implementation);
+    runtime::Options draft_options = target_options;
+    draft_options.is_draft_engine(true);
+    EplbInitWorker target(parallel_args, device, target_options);
+    EplbInitWorker draft(parallel_args, device, draft_options);
+    target_options.model_impl("other");
+    draft_options.model_impl("other");
+
+    const ModelContext target_context =
+        target.make_context(/*num_speculative_tokens=*/4);
+    const ModelContext draft_context =
+        draft.make_context(/*num_speculative_tokens=*/0);
+    EXPECT_EQ(target_context.get_model_impl(), implementation);
+    EXPECT_EQ(draft_context.get_model_impl(), implementation);
+    const ModelContext derived_context =
+        draft_context.with_quant_args(QuantArgs{});
+    ModelConfig::get_instance().model_impl("changed_after_context_creation");
+    EXPECT_EQ(derived_context.get_model_impl(), implementation);
+
+    auto verify_dummy_input = [&]<typename Input>(const ModelContext& context) {
+      Input input;
+      auto& batch = input.input_params.meta.execution_batch;
+      batch.num_reqs = 2;
+      batch.num_tokens = 2;
+      batch.num_scheduled_tokens = {1, 1};
+      batch.num_computed_tokens = {5, 6};
+      batch.is_prefilling = {false, false};
+      batch.query_start_loc = {0, 1, 2};
+      build_dummy_forward_input(input, /*query_width=*/3, context);
+      EXPECT_EQ(input.token_ids.numel(), 3);
+      EXPECT_EQ(input.token_ids.device(), device);
+      EXPECT_EQ(input.positions.numel(), 3);
+      EXPECT_EQ(input.input_params.embedding.linear_state_indices.numel(), 3);
+      EXPECT_EQ(batch.num_reqs, is_python ? 0 : 2);
+      EXPECT_EQ(batch.num_tokens, is_python ? 3 : 2);
+      EXPECT_EQ(batch.num_scheduled_tokens.empty(), is_python);
+      EXPECT_EQ(batch.num_computed_tokens.empty(), is_python);
+      EXPECT_EQ(batch.is_prefilling.empty(), is_python);
+      const std::vector<int32_t> expected_starts =
+          is_python ? std::vector<int32_t>{0} : std::vector<int32_t>{0, 1, 2};
+      EXPECT_EQ(batch.query_start_loc, expected_starts);
+    };
+    verify_dummy_input.template operator()<LlmForwardInput>(target_context);
+    verify_dummy_input.template operator()<VlmForwardInput>(derived_context);
+  }
+}
+
 TEST_F(EplbWorkerOptionsTest,
        LoadsFollowInjectedConfigAndExecutorBelongsToTarget) {
   if (Platform::device_count() < 1) {

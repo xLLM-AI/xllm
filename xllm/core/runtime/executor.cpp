@@ -25,10 +25,9 @@ namespace xllm {
 Executor::Executor(CausalLM* model,
                    const ModelContext& context,
                    const runtime::Options& options) {
-  const auto& model_config = ModelConfig::get_instance();
   std::string executor_type = model->executor_type();
   if (executor_type.empty()) {
-    if (ModelConfig::is_python_model_impl(model_config.model_impl())) {
+    if (ModelConfig::is_python_model_impl(context.get_model_impl())) {
       executor_type = "python";
     } else if (options.backend() != "vlm" && options.enable_graph()) {
       executor_type = Platform::type_str();

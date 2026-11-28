@@ -729,8 +729,8 @@ void WorkerImpl::prepare_linear_state_cache(const ModelParamsView& params) {
   bool reads_distinct_state = false;
 #if defined(USE_NPU)
   const ModelArgs& args = context_.get_model_args();
-  const bool is_python_model = ModelConfig::is_python_model_impl(
-      ModelConfig::get_instance().model_impl());
+  const bool is_python_model =
+      ModelConfig::is_python_model_impl(context_.get_model_impl());
   reads_distinct_state =
       (is_python_model && is_glm5_next_target_model_type(args.model_type()) &&
        params.meta.batch_forward_type.no_decode()) ||
@@ -887,7 +887,8 @@ std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
 template <typename Input>
 void build_dummy_forward_input(Input& input,
                                int32_t query_width,
-                               const torch::Device& device) {
+                               const ModelContext& context) {
+  const torch::Device device = context.get_tensor_options().device();
   auto token_options = input.token_ids.defined()
                            ? input.token_ids.options()
                            : torch::TensorOptions().dtype(torch::kInt32);
@@ -898,8 +899,7 @@ void build_dummy_forward_input(Input& input,
   input.positions = torch::arange(query_width, position_options.device(device));
   input.input_params.embedding.linear_state_indices = torch::zeros(
       {query_width}, token_options.dtype(torch::kInt32).device(device));
-  if (ModelConfig::is_python_model_impl(
-          ModelConfig::get_instance().model_impl())) {
+  if (ModelConfig::is_python_model_impl(context.get_model_impl())) {
     auto& execution_batch = input.input_params.meta.execution_batch;
     execution_batch.num_reqs = 0;
     execution_batch.num_tokens = query_width;
@@ -918,7 +918,7 @@ void WorkerImpl::prepare_dummy_input(Input& input) {
       !params.meta.batch_forward_type.is_empty() &&
       (parallel_args_.dp_size() > 1 || parallel_args_.ep_size() > 1 ||
        !parallel_args_.mapping_data().empty())) {
-    build_dummy_forward_input(input, /*query_width=*/1, device_);
+    build_dummy_forward_input(input, /*query_width=*/1, context_);
   }
 }
 
@@ -1432,7 +1432,7 @@ ModelContext WorkerImpl::load_model_config(ModelArgs args,
       options_.enable_chunked_prefill(),
       ModelBatchLimits{.max_tokens_per_batch = options_.max_tokens_per_batch(),
                        .max_seqs_per_batch = options_.max_seqs_per_batch()});
-  context.set_model_impl(ModelConfig::get_instance().model_impl());
+  context.set_model_impl(options_.model_impl());
   context.set_extension_impl(options_.extension_impl());
   context.set_model_id(options_.model_id());
   FlashComm1Options flash_comm1_options;
@@ -1862,10 +1862,10 @@ void WorkerImpl::set_hierarchy_layer_synchronizer(
 
 template void build_dummy_forward_input(LlmForwardInput&,
                                         int32_t,
-                                        const torch::Device&);
+                                        const ModelContext&);
 template void build_dummy_forward_input(VlmForwardInput&,
                                         int32_t,
-                                        const torch::Device&);
+                                        const ModelContext&);
 template void WorkerImpl::prepare_schedule_overlap(const LlmForwardInput&);
 template void WorkerImpl::prepare_schedule_overlap(const VlmForwardInput&);
 template void WorkerImpl::finalize_no_sync_output(ForwardOutput&,
