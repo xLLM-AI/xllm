@@ -1572,18 +1572,16 @@ uint32_t WorkerImpl::transfer_kv_blocks(
       // worker executor so it runs after that forward; the hierarchy transfer
       // then makes its copy stream wait on compute_stream_. H2D must remain on
       // the RPC thread because it is registered before the matching forward.
-      auto result = std::make_shared<std::promise<uint32_t>>();
-      std::future<uint32_t> future = result->get_future();
-      threadpool_.schedule(
-          [this, batch_id, block_transfer_info, result]() mutable {
-            try {
-              result->set_value(hierarchy_kv_transfer_->transfer_kv_blocks(
-                  batch_id, block_transfer_info));
-            } catch (...) {
-              result->set_exception(std::current_exception());
-            }
+      std::packaged_task<std::future<uint32_t>()> offload(
+          [this, blocks = block_transfer_info]() mutable {
+            return hierarchy_kv_transfer_->offload_async(std::move(blocks));
           });
-      return future.get();
+      auto submitted = offload.get_future();
+      threadpool_.schedule(std::move(offload));
+      // Keep the RPC (and its block references) alive until the writer
+      // finishes.
+      auto completion = submitted.get();
+      return completion.get();
     }
     return hierarchy_kv_transfer_->transfer_kv_blocks(batch_id,
                                                       block_transfer_info);
