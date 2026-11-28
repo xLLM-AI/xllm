@@ -241,9 +241,6 @@ def _create_attention_backend(
             is_mla=bool(config.get("enable_mla", False)),
             device=device,
             dtype=dtype,
-            # Only the GLM5 DSpark draft carries the dense MLA block-draft
-            # attention shape.
-            mla_block_draft=model_type == "glm5_dspark",
         )
     if current_platform.is_cuda():
         from xllm.python.attention.flashinfer import FlashInferBackend
@@ -313,6 +310,11 @@ class ModelExecutor:
             and current_platform.is_npu()
         ):
             graph_backend = "aclgraph"
+        if graph_backend == "aclgraph" and config.get("model_type") == "DFlashDraftModel":
+            # Physical request-row metadata does not imply graph support.
+            # DFlash retains its eager execution path independently of layout.
+            logger.info("Python DFlash draft uses eager execution; ACL graph capture is unsupported")
+            graph_backend = "off"
         if (
             current_platform.is_npu()
             and config.get("model_type") == "glm_moe_dsa_mtp"
@@ -471,7 +473,6 @@ class ModelExecutor:
                 int(config["max_position_embeddings"]),
                 dp_size,
                 dp_rank,
-                non_causal_warmup_max_kv_len=int(config.get("non_causal_decode_graph_warmup_max_kv_len", 0)),
                 num_speculative_tokens=self.num_speculative_tokens,
                 is_spec_draft=bool(config.get("is_draft_engine", False)),
                 enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),

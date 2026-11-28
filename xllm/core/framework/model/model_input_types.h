@@ -324,6 +324,8 @@ struct BatchInputMeta {
   int32_t q_max_seq_len = 0;
   int32_t num_speculative_tokens = 0;
   ExecutionBatchMetadata execution_batch;
+  // Physical KV rows per request, independent of attention mask semantics.
+  bool decode_kv_per_request = false;
   uint64_t batch_id = 0;
   bool requires_host_restore = false;
   bool is_graph_warmup = false;

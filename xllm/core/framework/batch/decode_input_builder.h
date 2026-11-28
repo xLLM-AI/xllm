@@ -138,6 +138,7 @@ void update_decode_batch_metadata(Params& input_params,
                                   const DecodeInputOptions& decode_options,
                                   int32_t num_requests) {
   input_params.meta.num_sequences = num_requests;
+  input_params.meta.decode_kv_per_request = decode_options.per_request;
   const int32_t query_width = decode_options.query_width;
   if (!decode_options.per_request && !decode_options.causal &&
       input_params.meta.actual_num_sequences > 0) {

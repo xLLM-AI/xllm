@@ -137,14 +137,13 @@ patch.__enter__()
         parallel, args, QuantArgs(), torch::TensorOptions().device(device));
     PyCausalLM model(context, "test_reload");
     py::dict model_config = model.config_dict().cast<py::dict>();
-    model_config["block_draft_graph_warmup_max_kv_len"] = 8192;
+    model_config["enable_graph_mode_decode_no_padding"] = true;
     std::vector<KVCache> caches;
     for (bool layerwise : {false, true}) {
       scope["layerwise"] = layerwise;
       runtime::Options options;
       options.enable_graph_mode_decode_no_padding(layerwise)
-          .acl_graph_decode_batch_size_limit(layerwise ? 3 : 7)
-          .block_draft_graph_warmup_max_kv_len(layerwise ? -1 : 4096);
+          .acl_graph_decode_batch_size_limit(layerwise ? 3 : 7);
       PyExecutorImpl executor(&model, args, device, options);
       // Both modes share the same checkpoint config and unchanged singleton.
       // The bridge must preserve each executor's graph settings.
@@ -153,12 +152,8 @@ patch.__enter__()
                                   .cast<py::dict>();
       EXPECT_EQ(config["enable_graph_mode_decode_no_padding"].cast<bool>(),
                 layerwise);
-      EXPECT_EQ(
-          config["non_causal_decode_graph_warmup_max_kv_len"].cast<int32_t>(),
-          layerwise ? -1 : 4096);
-      EXPECT_EQ(
-          model_config["block_draft_graph_warmup_max_kv_len"].cast<int32_t>(),
-          8192);
+      EXPECT_TRUE(
+          model_config["enable_graph_mode_decode_no_padding"].cast<bool>());
       EXPECT_EQ(scope["executor_limits"]
                     .cast<py::list>()[layerwise ? 1 : 0]
                     .cast<int32_t>(),

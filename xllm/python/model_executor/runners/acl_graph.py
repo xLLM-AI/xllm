@@ -93,7 +93,7 @@ class StaticGraphAttentionMetadata:
     is_mixed: bool = False
     is_dummy: bool = False
     # KV rows address either individual tokens or complete query requests.
-    decode_kv_layout: Literal["token", "request"] = "token"
+    decode_kv_per_request: bool = False
     decode_query_width: int | None = None
     num_speculative_tokens: int = 0
     is_target_verify: bool = False

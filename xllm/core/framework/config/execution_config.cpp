@@ -37,15 +37,6 @@ DEFINE_bool(disable_graph_warmup,
             "Whether to skip synthetic graph warmup during engine startup. "
             "When enabled, graphs are captured lazily by real requests.");
 
-DEFINE_int32(block_draft_graph_warmup_max_kv_len,
-             0,
-             "Pre-capture power-of-two KV capacity buckets for Python block "
-             "draft ACL graphs. 0 covers the full model context; a positive "
-             "value bounds proactive capture while retaining required warmup "
-             "shapes; -1 retains lazy capacity capture. "
-             "Requests beyond the warmup limit can still grow graphs lazily. "
-             "Does not change target or MTP graph warmup.");
-
 DEFINE_bool(enable_graph_mm_encoder,
             false,
             "Whether to capture the Python Qwen3-VL multimodal encoder as ACL "
@@ -149,7 +140,6 @@ void ExecutionConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(extension_impl);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(disable_graph_warmup);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(block_draft_graph_warmup_max_kv_len);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph_mm_encoder);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(mm_encoder_graph_capture_shapes);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph_double_buffer);
@@ -173,7 +163,6 @@ void ExecutionConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(extension_impl);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph);
   XLLM_CONFIG_ASSIGN_FROM_JSON(disable_graph_warmup);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(block_draft_graph_warmup_max_kv_len);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph_mm_encoder);
   XLLM_CONFIG_ASSIGN_FROM_JSON(mm_encoder_graph_capture_shapes);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph_double_buffer);
@@ -202,8 +191,6 @@ void ExecutionConfig::append_config_json(
       config_json, default_config, enable_graph);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, disable_graph_warmup);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, block_draft_graph_warmup_max_kv_len);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_graph_mm_encoder);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

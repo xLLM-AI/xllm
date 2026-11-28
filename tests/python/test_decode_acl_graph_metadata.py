@@ -652,7 +652,7 @@ def test_executor_reuses_non_causal_graph_with_fresh_preparation_and_rejects_cha
     block_runner._prepare_attention = runner._prepare_attention
     executor.decode_graph_runner = block_runner
     metadata = _metadata()
-    metadata.decode_kv_layout = "request"
+    metadata.decode_kv_per_request = True
     metadata.decode_query_width = query_width
     metadata.q_seq_lens = torch.tensor([query_width, query_width], dtype=torch.int32)
     metadata.q_cu_seq_lens = torch.tensor([0, query_width, 2 * query_width], dtype=torch.int32)
@@ -689,7 +689,7 @@ def test_executor_reuses_non_causal_graph_with_fresh_preparation_and_rejects_cha
             metadata.kv_seq_lens.add_(1)
             metadata.kv_seq_lens_host_values[:] = metadata.kv_seq_lens.tolist()
 
-        metadata.q_seq_lens[1] = query_width + 1
+        metadata.q_cu_seq_lens_host_values[-1] += 1
         assert executor.execute(tokens, tokens, metadata) is executor.eager_runner.execute.return_value
         assert prepare.call_count == 3
 
@@ -725,7 +725,7 @@ def test_one_runner_keeps_token_and_request_kv_layouts_and_output_lifetimes_sepa
     token_metadata = _metadata()
     sequences = tokens.numel() // width
     request_metadata = _metadata()
-    request_metadata.decode_kv_layout = "request"
+    request_metadata.decode_kv_per_request = True
     request_metadata.decode_query_width = width
     request_metadata.q_seq_lens = torch.full((sequences,), width, dtype=torch.int32)
     request_metadata.q_cu_seq_lens = torch.arange(sequences + 1, dtype=torch.int32) * width
@@ -751,14 +751,16 @@ def test_one_runner_keeps_token_and_request_kv_layouts_and_output_lifetimes_sepa
         entry = next(
             entry
             for entry in runner._graphs.values()
-            if entry.static_metadata.decode_kv_layout == getattr(metadata, "decode_kv_layout", "token")
+            if entry.static_metadata.decode_kv_per_request == getattr(metadata, "decode_kv_per_request", False)
         )
-        entries[entry.static_metadata.decode_kv_layout] = entry
+        entries[entry.static_metadata.decode_kv_per_request] = entry
         owns_request_buffers = metadata is request_metadata
         assert (entry.execution_state.serial_buffers is None) == owns_request_buffers
         assert (output.data_ptr() == entry.static_output.data_ptr()) == owns_request_buffers
     assert runner._capture.call_count == 2
-    assert entries["token"].static_input_ids.data_ptr() != entries["request"].static_input_ids.data_ptr()
-    assert entries["token"].static_metadata.block_table.shape[0] == 2
-    assert entries["request"].static_metadata.block_table.shape[0] == sequences
+    token_entry = entries[False]
+    request_entry = entries[True]
+    assert token_entry.static_input_ids.data_ptr() != request_entry.static_input_ids.data_ptr()
+    assert token_entry.static_metadata.block_table.shape[0] == 2
+    assert request_entry.static_metadata.block_table.shape[0] == sequences
     executor.eager_runner.execute.assert_not_called()

@@ -454,34 +454,62 @@ def test_mla_cp_uses_one_paged_sequence_per_zigzag_segment_and_reuses_lengths(
 
 @pytest.mark.parametrize("width", [1, 3, 8])
 @pytest.mark.parametrize("prepared", [False, True], ids=["eager", "graph"])
-def test_non_causal_mla_keeps_query_geometry_without_prefill_flags(width: int, prepared: bool) -> None:
-    backend = NpuPagedAttentionBackend(
-        2, 1, 8, 0.125, 0, True, torch.device("cpu"), torch.float32, mla_block_draft=True
-    )
+def test_mla_uses_each_steps_query_layout_without_prefill_flags(width: int, prepared: bool) -> None:
+    backend = NpuPagedAttentionBackend(2, 1, 8, 0.125, 0, True, torch.device("cpu"), torch.float32)
     cache = torch.zeros(4, 128, 1, 8)
     backend.bind_kv_caches([LayerCache(cache, cache)])
-    metadata = StaticGraphAttentionMetadata(
-        slot_mapping=torch.full((2 * width,), -1, dtype=torch.int32),
-        paged_kv_indptr=torch.tensor([0, 1, 2], dtype=torch.int32),
-        paged_kv_indices=torch.tensor([1, 2], dtype=torch.int32),
-        paged_kv_last_page_len=torch.tensor([32, 64], dtype=torch.int32),
-        q_seq_lens=torch.full((2,), width, dtype=torch.int32),
-        q_cu_seq_lens=torch.tensor([0, width, 2 * width], dtype=torch.int32),
-        q_cu_seq_lens_host_values=[width, 2 * width],
-        kv_seq_lens=torch.tensor([32, 64], dtype=torch.int32),
-        kv_seq_lens_host_values=[32, 64],
-        block_table=torch.tensor([[1], [2]], dtype=torch.int32),
-        decode_query_width=width,
-    )
-    if prepared:
-        metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
-    backend.prepare(metadata, graph_mode=prepared)
-    assert backend._mla_actual_seq_q.tolist() == [width, 2 * width]
-    assert backend._mla_actual_seq_q_host == [width, 2 * width]
-    assert backend._mla_max_seqlen_q == width
-
+    for per_request, query_width in ((True, width), (False, 1), (True, width)):
+        metadata = StaticGraphAttentionMetadata(
+            slot_mapping=torch.full((2 * query_width,), -1, dtype=torch.int32),
+            paged_kv_indptr=torch.tensor([0, 1, 2], dtype=torch.int32),
+            paged_kv_indices=torch.tensor([1, 2], dtype=torch.int32),
+            paged_kv_last_page_len=torch.tensor([32, 64], dtype=torch.int32),
+            q_seq_lens=torch.full((2,), query_width, dtype=torch.int32),
+            q_cu_seq_lens=torch.tensor([0, query_width, 2 * query_width], dtype=torch.int32),
+            q_cu_seq_lens_host_values=[query_width, 2 * query_width],
+            kv_seq_lens=torch.tensor([32, 64], dtype=torch.int32),
+            kv_seq_lens_host_values=[32, 64],
+            block_table=torch.tensor([[1], [2]], dtype=torch.int32),
+            decode_kv_per_request=per_request,
+            decode_query_width=query_width,
+        )
+        if prepared:
+            metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+        backend.prepare(metadata, graph_mode=prepared)
+        assert backend._mla_actual_seq_q.tolist() == [query_width, 2 * query_width]
+        assert backend._mla_actual_seq_q_host == [query_width, 2 * query_width]
+        assert backend._mla_max_seqlen_q == query_width
     if prepared:
         metadata.is_chunked_prefill = True
         metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
         with pytest.raises(ValueError, match="requires decode"):
             backend.prepare(metadata, graph_mode=True)
+
+
+@pytest.mark.parametrize("separate_rope", [False, True])
+def test_mla_request_attention_checks_kernel_capability(separate_rope: bool) -> None:
+    backend = NpuPagedAttentionBackend(2, 1, 8, 0.125, 0, True, torch.device("cpu"), torch.float32)
+    backend._mla_actual_seq_q_host = [3, 6]
+    backend._mla_actual_seq_kv = torch.tensor([4, 7], dtype=torch.int32)
+    query = torch.zeros(6, 2, 8)
+    query_rope = torch.zeros(6, 2, 4)
+    cache = torch.zeros(4, 8, 1, 8)
+    rope_cache = torch.zeros(4, 8, 1, 4)
+    block_table = torch.tensor([[1], [2]], dtype=torch.int32)
+    layer = Attention(num_heads=2, num_kv_heads=1, head_dim=8, scale=0.125, sliding_window=0, layer_id=0)
+    with patch.object(backend, "_fia_with_rope", return_value=(query, None)) as kernel:
+        if not separate_rope:
+            backend._fia_with_rope = None
+            with pytest.raises(RuntimeError, match="separate RoPE support"):
+                backend._mla_block_fia_v2(query, query_rope, cache, rope_cache, block_table, layer)
+            kernel.assert_not_called()
+            return
+        assert backend._mla_block_fia_v2(query, query_rope, cache, rope_cache, block_table, layer) is query
+    mask = kernel.call_args.kwargs["atten_mask"]
+    assert mask.shape == (2, 1, 3, 8)
+    assert not mask[0, :, :, :4].any()
+    assert mask[0, :, :, 4:].all()
+    assert not mask[1, :, :, :7].any()
+    assert mask[1, :, :, 7:].all()
+    assert kernel.call_args.kwargs["actual_seq_lengths"] == [3, 6]
+    assert kernel.call_args.kwargs["actual_seq_lengths_kv"] == [8, 8]

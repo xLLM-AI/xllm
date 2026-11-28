@@ -28,6 +28,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/batch/decode_input_builder.h"
 #include "core/kernels/npu/tilelang/mtp_prepare_next_draft.h"
 #include "core/kernels/xllm_torch_ops.h"
 #include "core/layers/common/attention_metadata.h"
@@ -299,27 +300,30 @@ TEST(MtpAsyncInputBuilderTest,
   metadata->num_speculative_tokens = 7;
   metadata->max_query_len = 1;
   for (const bool is_draft : {false, true}) {
-    for (const int32_t width : {1, 4, 7, 8}) {
-      LlmModelParams storage;
-      storage.meta.batch_forward_type = BatchForwardType::DECODE;
-      storage.meta.execution_batch.num_reqs = 2;
-      storage.meta.execution_batch.num_tokens = 2 * width;
-      storage.meta.execution_batch.num_scheduled_tokens = {width, width};
-      // Attention rows may already be expanded to one row per token.
-      metadata->q_seq_lens_vec.assign(2 * width, 1);
-      metadata->slot_mapping = torch::arange(2 * width, torch::kInt32);
-      PyAttentionMetadataView view(
-          metadata,
-          ModelParamsView(storage),
-          is_draft,
-          is_draft ? DecodeKVLayout::REQUEST : DecodeKVLayout::TOKEN);
-      ASSERT_TRUE(view.decode_query_width().has_value());
-      EXPECT_EQ(*view.decode_query_width(), width);
-      EXPECT_EQ(view.num_speculative_tokens(), 7);
-      EXPECT_STREQ(view.decode_kv_layout(), is_draft ? "request" : "token");
-      EXPECT_EQ(view.is_target_verify(), !is_draft && width > 1);
-      storage.meta.execution_batch.num_scheduled_tokens = {2, 3};
-      EXPECT_EQ(*view.decode_query_width(), width);
+    for (const bool per_request : {false, true}) {
+      for (const int32_t width : {1, 4, 7, 8}) {
+        LlmModelParams storage;
+        const DecodeInputOptions options{.query_width = width,
+                                         .per_request = per_request};
+        update_decode_batch_metadata(storage, options, /*num_requests=*/2);
+        storage.meta.execution_batch.num_reqs = 2;
+        storage.meta.execution_batch.num_tokens = 2 * width;
+        storage.meta.execution_batch.num_scheduled_tokens = {width, width};
+        // Attention rows may already be expanded to one row per token.
+        metadata->q_seq_lens_vec.assign(2 * width, 1);
+        metadata->slot_mapping = torch::arange(2 * width, torch::kInt32);
+        PyAttentionMetadataView view(
+            metadata, ModelParamsView(storage), is_draft);
+        ASSERT_TRUE(view.decode_query_width().has_value());
+        EXPECT_EQ(*view.decode_query_width(), width);
+        EXPECT_EQ(view.num_speculative_tokens(), 7);
+        EXPECT_EQ(view.decode_kv_per_request(), per_request);
+        EXPECT_EQ(view.is_target_verify(), !is_draft && width > 1);
+        storage.meta.execution_batch.num_scheduled_tokens = {2, 3};
+        storage.meta.decode_kv_per_request = !per_request;
+        EXPECT_EQ(*view.decode_query_width(), width);
+        EXPECT_EQ(view.decode_kv_per_request(), per_request);
+      }
     }
   }
   LlmModelParams variable;
@@ -332,13 +336,12 @@ TEST(MtpAsyncInputBuilderTest,
   dummy.meta.execution_batch.num_tokens = 7;
   metadata->is_dummy = false;
   // Block dummy inputs can carry nonzero attention geometry.
-  PyAttentionMetadataView dummy_view(metadata,
-                                     ModelParamsView(dummy),
-                                     /*is_draft_engine=*/true,
-                                     DecodeKVLayout::REQUEST);
+  dummy.meta.decode_kv_per_request = true;
+  PyAttentionMetadataView dummy_view(
+      metadata, ModelParamsView(dummy), /*is_draft_engine=*/true);
   ASSERT_TRUE(dummy_view.decode_query_width().has_value());
   EXPECT_EQ(*dummy_view.decode_query_width(), 7);
-  EXPECT_STREQ(dummy_view.decode_kv_layout(), "request");
+  EXPECT_TRUE(dummy_view.decode_kv_per_request());
 }
 
 TEST(MtpAsyncInputBuilderTest, PybindDraftDecodeDoesNotBorrowPrefillPhase) {

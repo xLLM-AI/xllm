@@ -20,38 +20,30 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    ("max_pages", "limit", "expected"),
+    ("max_pages", "expected"),
     [
-        (1, 0, (1,)),
-        (17, 0, (17,)),
-        (32, 0, (32,)),
-        (65, 0, (65, 64, 32)),
-        (2048, 0, (2048, 1024, 512, 256, 128, 64, 32)),
-        (2048, -1, ()),
-        (2048, 1, (32,)),
-        (2048, 4096, (32,)),
-        (2048, 4097, (64, 32)),
-        (2048, 12000, (128, 64, 32)),
-        (65, 65536, (65, 64, 32)),
+        (1, (1,)),
+        (17, (17,)),
+        (32, (32,)),
+        (65, (65, 64, 32)),
+        (2048, (2048, 1024, 512, 256, 128, 64, 32)),
     ],
 )
-def test_block_kv_warmup_covers_binary_buckets_largest_first(
-    max_pages: int, limit: int, expected: tuple[int, ...]
-) -> None:
-    from xllm.python.model_executor.runners.kv_capacity import non_causal_kv_capacity_buckets
+def test_request_kv_warmup_covers_full_context_largest_first(max_pages: int, expected: tuple[int, ...]) -> None:
+    from xllm.python.model_executor.runners.kv_capacity import request_decode_kv_capacity_buckets
 
-    assert non_causal_kv_capacity_buckets(128, max_pages, 7, limit) == expected
+    assert request_decode_kv_capacity_buckets(128, max_pages, 7) == expected
 
 
 @pytest.mark.parametrize(
-    ("page_size", "max_pages", "width", "limit"),
-    [(0, 64, 7, 0), (128, 0, 7, 0), (128, 64, 0, 0), (128, 64, 7, -2), (128, 64, 7, True)],
+    ("page_size", "max_pages", "width"),
+    [(0, 64, 7), (128, 0, 7), (128, 64, 0), (True, 64, 7)],
 )
-def test_block_kv_warmup_rejects_invalid_geometry(page_size: int, max_pages: int, width: int, limit: int) -> None:
-    from xllm.python.model_executor.runners.kv_capacity import non_causal_kv_capacity_buckets
+def test_request_kv_warmup_rejects_invalid_geometry(page_size: int, max_pages: int, width: int) -> None:
+    from xllm.python.model_executor.runners.kv_capacity import request_decode_kv_capacity_buckets
 
     with pytest.raises(ValueError):
-        non_causal_kv_capacity_buckets(page_size, max_pages, width, limit)
+        request_decode_kv_capacity_buckets(page_size, max_pages, width)
 
 
 @pytest.mark.parametrize(
