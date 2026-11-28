@@ -268,7 +268,8 @@ TEST(StaticKVBlockPoolTest, DraftLayersMustFillWholeFullBanks) {
   StaticKVLayoutSpec spec = make_spec();
   spec.full_layer_ids = {0, 3, 4, 5};
   spec.draft_layer_count = 1;
-  EXPECT_DEATH(StaticKVLayout invalid(spec), "whole companion banks");
+  EXPECT_DEATH(static_cast<void>(StaticKVLayout(spec)),
+               "whole companion banks");
   spec.draft_layer_count = 2;
   const StaticKVLayout layout(spec);
   EXPECT_EQ(layout.bank_count(), 3u);
@@ -503,7 +504,7 @@ TEST(StaticKVBlockPoolTest, PreservesScratchAndNegativeSentinelMappings) {
   pool.append_full_block_rows(/*block_id=*/0, &full_rows);
   pool.append_full_block_rows(/*block_id=*/-1, &full_rows);
   EXPECT_EQ(full_rows, (std::vector<int32_t>{0, 0, -1, -1}));
-  EXPECT_GT(layout.full_read_padding_row(), 0);
+  EXPECT_GT(layout.full_read_padding_page(), 0);
   std::vector<int32_t> linear_rows;
   pool.append_linear_state_rows(/*state_id=*/0, &linear_rows);
   pool.append_linear_state_slots(/*state_id=*/-2, &linear_rows);
@@ -535,7 +536,6 @@ TEST(StaticKVBlockPoolTest,
   pool.mark_active(ids[0], BlockType::KV);
   EXPECT_EQ(pool.final_full_page(ids[0]), first_page);
   EXPECT_EQ(pool.full_read_padding_page(), layout.full_read_padding_page());
-  EXPECT_EQ(pool.scratch_full_page(), 0);
 }
 
 TEST(StaticKVBlockPoolTest, ExcludesReadPaddingWhenSlabsChangeType) {
@@ -544,7 +544,7 @@ TEST(StaticKVBlockPoolTest, ExcludesReadPaddingWhenSlabsChangeType) {
   const size_t allocatable_begin =
       layout.num_reserved_slabs() * layout.slice_bytes();
   const size_t padding_end =
-      layout.full_read_padding_row() * layout.full_row_bytes() +
+      layout.full_read_padding_page() * layout.full_row_bytes() +
       layout.full_pair_bytes();
   ASSERT_LE(padding_end, allocatable_begin);
   const auto full =
@@ -579,7 +579,7 @@ TEST(StaticKVBlockPoolTest, AccountsForReadPaddingBeyondScratchSlab) {
       make_spec(/*num_slabs=*/4, /*checkpoint_stride=*/2));
   StaticKVBlockPool pool(/*logical_capacity=*/64, layout);
   EXPECT_EQ(layout.num_reserved_slabs(), 2);
-  EXPECT_EQ(layout.full_read_padding_row(), 4);
+  EXPECT_EQ(layout.full_read_padding_page(), 4);
   EXPECT_EQ(pool.num_total_slots(), 2 * layout.slab_bytes());
   EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 4);
   EXPECT_TRUE(layout.can_fit(/*full_blocks=*/4, /*linear_states=*/0));

@@ -147,18 +147,7 @@ class KVCacheManager {
     return block_resource_units(BlockType::KV, full_blocks) +
            block_resource_units(BlockType::LINEAR, 1);
   }
-  size_t additional_resource_units(Sequence* sequence,
-                                   size_t num_tokens) const {
-    const size_t tokens_per_block = block_size();
-    const size_t full_blocks =
-        num_tokens / tokens_per_block + (num_tokens % tokens_per_block != 0);
-    const size_t held = sequence->kv_state().num_blocks(BlockType::KV);
-    const size_t additional = full_blocks > held ? full_blocks - held : 0;
-    return block_resource_units(BlockType::KV, additional) +
-           block_resource_units(
-               BlockType::LINEAR,
-               sequence->kv_state().num_blocks(BlockType::LINEAR) == 0);
-  }
+
   // Advisory total capacity, including held blocks. Elastic caches may return
   // a stale physical-budget snapshot; a low value alone cannot prove that an
   // otherwise idle request will fail allocation. num_blocks() is the configured

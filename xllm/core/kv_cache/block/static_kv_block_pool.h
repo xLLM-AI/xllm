@@ -81,7 +81,6 @@ class StaticKVBlockPool final {
   int32_t final_full_page(int32_t logical_id) const;
   void append_final_full_pages(Slice<Block> blocks,
                                std::vector<int32_t>* pages) const;
-  int32_t scratch_full_page() const { return 0; }
   int32_t full_read_padding_page() const;
 
  private:

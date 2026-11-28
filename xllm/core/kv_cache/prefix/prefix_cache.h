@@ -129,14 +129,6 @@ class PrefixCache {
     return num_blocks_;
   }
 
-  float block_match_rate() {
-    if (total_blocks_.load() == 0) {
-      return 0;
-    } else {
-      return static_cast<float>(matched_blocks_.load()) / total_blocks_.load();
-    }
-  }
-
   static uint32_t compute_hash_keys(const Slice<int32_t>& token_ids,
                                     std::vector<Block>& blocks,
                                     const size_t cached_blocks = 0);
