@@ -26,8 +26,6 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
-#include "core/framework/config/execution_config.h"
-#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/encoder_cache/encoder_cache.h"
 #include "core/framework/model/mtp_topk_state.h"
@@ -211,8 +209,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
                                        ? "SSM"
                                        : "LLM";
   executor_config["enable_chunked_prefill"] = options_.enable_chunked_prefill();
-  executor_config["enable_prefix_cache"] =
-      KVCacheConfig::get_instance().enable_prefix_cache();
+  executor_config["enable_prefix_cache"] = options_.enable_prefix_cache();
   executor_config["enable_schedule_overlap"] =
       options_.enable_schedule_overlap();
   executor_config["is_draft_engine"] = options_.is_draft_engine();
@@ -226,10 +223,13 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
           options_.speculative_algorithm());
   executor_config["enable_graph_mode_decode_no_padding"] =
       options_.enable_graph_mode_decode_no_padding();
+  // Offline vision graph capture remains unsupported. Keep this policy local
+  // to the executor instead of changing the process configuration for workers.
   executor_config["enable_graph_mm_encoder"] =
-      ExecutionConfig::get_instance().enable_graph_mm_encoder();
+      options_.enable_graph_mm_encoder() &&
+      !options_.enable_offline_inference();
   executor_config["mm_encoder_graph_capture_shapes"] =
-      ExecutionConfig::get_instance().mm_encoder_graph_capture_shapes();
+      options_.mm_encoder_graph_capture_shapes();
   // DFlash2 defaults to eager in the model config. Enable its independent
   // full-block ACL runner when the worker requests graph execution.
   const bool independent_block_graph =

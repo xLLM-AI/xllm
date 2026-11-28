@@ -266,6 +266,10 @@ struct Options {
   PROPERTY(bool, enable_graph) = false;
   // use VMM-backed memory pools for graph captures across shapes
   PROPERTY(bool, enable_graph_vmm_pool) = true;
+  // Python vision encoder graph policy; offline executors retain eager
+  // encoding.
+  PROPERTY(bool, enable_graph_mm_encoder) = false;
+  PROPERTY(int32_t, mm_encoder_graph_capture_shapes) = 8;
   // alternate NPU graph slots so input preparation can overlap replay
   PROPERTY(bool, enable_graph_double_buffer) = true;
   // enable graph-mode decode without padding

@@ -21,10 +21,13 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/config/execution_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/platform/layer_synchronizer.h"
 #include "core/runtime/py_executor_impl.h"
+#include "core/util/scope_guard.h"
 #include "models/llm/py_causal_lm.h"
 
 namespace py = pybind11;
@@ -65,6 +68,14 @@ class TestLoadSynchronizer final : public LayerSynchronizer {
 // Neither checkpoint weights nor accelerator allocations are needed.
 TEST(PyExecutorKVLoadTest, PrefillWaitsAtConsumersAndGraphKeepsCompositeFence) {
   py::gil_scoped_acquire gil;
+  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
+  KVCacheConfig& cache_config = KVCacheConfig::get_instance();
+  const ExecutionConfig previous_execution_config = execution_config;
+  const KVCacheConfig previous_cache_config = cache_config;
+  ScopeGuard restore_config([&] {
+    execution_config = previous_execution_config;
+    cache_config = previous_cache_config;
+  });
   py::dict scope;
   scope["torch"] = py::module_::import("torch");
   const torch::Tensor ready = torch::zeros({3});
@@ -138,22 +149,40 @@ patch.__enter__()
     PyCausalLM model(context, "test_reload");
     py::dict model_config = model.config_dict().cast<py::dict>();
     model_config["enable_graph_mode_decode_no_padding"] = true;
+    model_config["enable_prefix_cache"] = true;
+    model_config["enable_graph_mm_encoder"] = true;
+    model_config["mm_encoder_graph_capture_shapes"] = 77;
     std::vector<KVCache> caches;
     for (bool layerwise : {false, true}) {
       scope["layerwise"] = layerwise;
+      execution_config.enable_graph_mm_encoder(!layerwise)
+          .mm_encoder_graph_capture_shapes(99);
+      cache_config.enable_prefix_cache(!layerwise);
+      const int32_t capture_shapes = layerwise ? 3 : 0;
       runtime::Options options;
       options.enable_graph_mode_decode_no_padding(layerwise)
-          .acl_graph_decode_batch_size_limit(layerwise ? 3 : 7);
+          .acl_graph_decode_batch_size_limit(layerwise ? 3 : 7)
+          .enable_prefix_cache(layerwise)
+          .enable_graph_mm_encoder(layerwise)
+          .mm_encoder_graph_capture_shapes(capture_shapes);
       PyExecutorImpl executor(&model, args, device, options);
-      // Both modes share the same checkpoint config and unchanged singleton.
-      // The bridge must preserve each executor's graph settings.
+      // The bridge must use the worker snapshot despite conflicting checkpoint
+      // and process settings, without mutating the shared checkpoint config.
       const py::dict config = scope["executor_configs"]
                                   .cast<py::list>()[layerwise ? 1 : 0]
                                   .cast<py::dict>();
       EXPECT_EQ(config["enable_graph_mode_decode_no_padding"].cast<bool>(),
                 layerwise);
+      EXPECT_EQ(config["enable_prefix_cache"].cast<bool>(), layerwise);
+      EXPECT_EQ(config["enable_graph_mm_encoder"].cast<bool>(), layerwise);
+      EXPECT_EQ(config["mm_encoder_graph_capture_shapes"].cast<int32_t>(),
+                capture_shapes);
       EXPECT_TRUE(
           model_config["enable_graph_mode_decode_no_padding"].cast<bool>());
+      EXPECT_TRUE(model_config["enable_prefix_cache"].cast<bool>());
+      EXPECT_TRUE(model_config["enable_graph_mm_encoder"].cast<bool>());
+      EXPECT_EQ(model_config["mm_encoder_graph_capture_shapes"].cast<int32_t>(),
+                77);
       EXPECT_EQ(scope["executor_limits"]
                     .cast<py::list>()[layerwise ? 1 : 0]
                     .cast<int32_t>(),
@@ -177,6 +206,24 @@ patch.__enter__()
         EXPECT_EQ(output.hidden_states.item<float>(), 10.0F);
       }
     }
+    execution_config.enable_graph_mm_encoder(true);
+    cache_config.enable_prefix_cache(true);
+    runtime::Options offline_options;
+    offline_options.enable_offline_inference(true)
+        .enable_prefix_cache(false)
+        .enable_graph_mm_encoder(true)
+        .mm_encoder_graph_capture_shapes(4);
+    PyExecutorImpl offline_executor(&model, args, device, offline_options);
+    const py::dict offline_config =
+        scope["executor_configs"].cast<py::list>()[2].cast<py::dict>();
+    EXPECT_FALSE(offline_config["enable_graph_mm_encoder"].cast<bool>());
+    EXPECT_FALSE(offline_config["enable_prefix_cache"].cast<bool>());
+    EXPECT_EQ(offline_config["mm_encoder_graph_capture_shapes"].cast<int32_t>(),
+              4);
+    EXPECT_TRUE(model_config["enable_graph_mm_encoder"].cast<bool>());
+    EXPECT_TRUE(execution_config.enable_graph_mm_encoder());
+    EXPECT_TRUE(cache_config.enable_prefix_cache());
+    EXPECT_EQ(execution_config.mm_encoder_graph_capture_shapes(), 99);
   }
   scope["patch"].attr("__exit__")(py::none(), py::none(), py::none());
 }

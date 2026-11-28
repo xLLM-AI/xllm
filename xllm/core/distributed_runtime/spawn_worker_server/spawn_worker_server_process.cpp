@@ -21,6 +21,7 @@ limitations under the License.
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #if defined(USE_NPU)
@@ -85,6 +86,7 @@ limitations under the License.
 // @layerwise_split_size (optional)
 // @enable_mm_encoder_dp (optional)
 // @enable_graph_vmm_pool (optional)
+// @enable_prefix_cache (optional)
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -151,6 +153,20 @@ int main(int argc, char* argv[]) {
     LOG(ERROR) << "Spawn worker process received invalid graph VMM pool "
                   "argument: expected 0 or 1.";
     return 1;
+  }
+
+  // Older launchers omit the prefix-cache setting and retain its enabled
+  // default.
+  bool enable_prefix_cache = true;
+  if (argc > xllm::spawn_worker_protocol::kEnablePrefixCacheArgumentIndex) {
+    const std::string_view enabled(
+        argv[xllm::spawn_worker_protocol::kEnablePrefixCacheArgumentIndex]);
+    if (enabled != "0" && enabled != "1") {
+      LOG(ERROR) << "Spawn worker process received invalid prefix-cache "
+                    "argument: expected 0 or 1.";
+      return 1;
+    }
+    enable_prefix_cache = enabled == "1";
   }
 
   xllm::load_native_libraries();
@@ -331,7 +347,8 @@ int main(int argc, char* argv[]) {
                                    enable_graph_double_buffer.value(),
                                    graph_decode_batch_size_limit.value(),
                                    topology_config.value(),
-                                   enable_graph_vmm_pool.value());
+                                   enable_graph_vmm_pool.value(),
+                                   enable_prefix_cache);
 
     worker.run();
   }
