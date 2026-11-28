@@ -658,6 +658,7 @@ TEST(CudaGraphExecutorTest, BatchDecodeCaptureAndReplay) {
   args.n_kv_heads(1);
 
   runtime::Options options;
+  options.enable_graph_vmm_pool(false);
   options.block_size(1);
   options.enable_graph_mode_decode_no_padding(true);
   options.max_seqs_per_batch(1);
@@ -715,6 +716,7 @@ TEST(CudaGraphExecutorTest, BatchDecodePaddedBucket100CaptureAndReplay) {
   args.max_position_embeddings(16);
   runtime::Options options =
       make_test_runtime_options(/*max_seqs_per_batch=*/100);
+  options.enable_graph_vmm_pool(false);
   options.enable_graph_mode_decode_no_padding(false);
 
   runtime::cuda::CudaGraphPersistentParam persistent(args, device, options);
@@ -789,6 +791,7 @@ TEST(CudaGraphExecutorTest, BatchDecodeNoPaddingBucket100CaptureAndReplay) {
   args.max_position_embeddings(16);
   runtime::Options options =
       make_test_runtime_options(/*max_seqs_per_batch=*/100);
+  options.enable_graph_vmm_pool(false);
 
   runtime::cuda::CudaGraphPersistentParam persistent(args, device, options);
   EXPECT_EQ(
@@ -869,6 +872,7 @@ TEST(CudaGraphExecutorTest,
   args.layer_types({"linear_attention", "full_attention"});
 
   runtime::Options options;
+  options.enable_graph_vmm_pool(false);
   options.block_size(1);
   options.enable_graph_mode_decode_no_padding(true);
   options.max_seqs_per_batch(1);
@@ -930,6 +934,7 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
   args.n_kv_heads(1);
 
   runtime::Options options;
+  options.enable_graph_vmm_pool(false);
   options.block_size(1);
   options.enable_graph_mode_decode_no_padding(true);
   options.enable_prefill_piecewise_graph(true).max_tokens_for_graph_mode(113);
@@ -1054,6 +1059,7 @@ TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
     args.n_kv_heads(n_kv_heads);
 
     runtime::Options options;
+    options.enable_graph_vmm_pool(false);
     options.block_size(1);
     options.enable_graph_mode_decode_no_padding(true);
     options.enable_prefill_piecewise_graph(true).max_tokens_for_graph_mode(128);
@@ -1162,9 +1168,12 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolMemoryReuseAcrossMultiShape) {
   };
 
   auto run_prefill_capture_sweep = [&](bool enable_graph_vmm_pool) {
+    options.enable_graph_vmm_pool(enable_graph_vmm_pool);
     ExecutionConfig::get_instance().enable_graph_vmm_pool(
-        enable_graph_vmm_pool);
+        !enable_graph_vmm_pool);
     auto [model, exec] = create_executor();
+    // Capture and memory accounting must retain the executor's pool policy.
+    options.enable_graph_vmm_pool(!enable_graph_vmm_pool);
 
     auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
     auto all_tokens = torch::arange(1, 257, iopt);

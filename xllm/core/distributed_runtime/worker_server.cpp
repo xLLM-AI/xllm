@@ -434,9 +434,10 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         graph_decode_batch_size_limit_str.c_str(),
                         layerwise_split_size_str.c_str(),
                         enable_mm_encoder_dp_ptr,
+                        options.enable_graph_vmm_pool() ? "1" : "0",
                         nullptr};
   static_assert(std::size(argv) ==
-                spawn_worker_protocol::kEnableMmEncoderDpArgumentIndex + 2);
+                spawn_worker_protocol::kEnableGraphVmmPoolArgumentIndex + 2);
   pid_t pid;
   int status = posix_spawnp(
       &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);

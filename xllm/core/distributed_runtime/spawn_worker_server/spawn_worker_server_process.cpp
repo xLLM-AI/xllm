@@ -84,6 +84,7 @@ limitations under the License.
 // @acl_graph_decode_batch_size_limit (optional)
 // @layerwise_split_size (optional)
 // @enable_mm_encoder_dp (optional)
+// @enable_graph_vmm_pool (optional)
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -141,6 +142,14 @@ int main(int argc, char* argv[]) {
   if (!topology_config.has_value()) {
     LOG(ERROR) << "Spawn worker process received invalid topology arguments: "
                   "expected positive layerwise split and 0/1 encoder DP.";
+    return 1;
+  }
+
+  const std::optional<bool> enable_graph_vmm_pool =
+      xllm::spawn_worker_protocol::parse_graph_vmm_pool(argc, argv);
+  if (!enable_graph_vmm_pool.has_value()) {
+    LOG(ERROR) << "Spawn worker process received invalid graph VMM pool "
+                  "argument: expected 0 or 1.";
     return 1;
   }
 
@@ -321,7 +330,8 @@ int main(int argc, char* argv[]) {
                                    prefill_config.value(),
                                    enable_graph_double_buffer.value(),
                                    graph_decode_batch_size_limit.value(),
-                                   topology_config.value());
+                                   topology_config.value(),
+                                   enable_graph_vmm_pool.value());
 
     worker.run();
   }

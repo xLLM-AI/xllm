@@ -264,6 +264,8 @@ struct Options {
 
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;
+  // use VMM-backed memory pools for graph captures across shapes
+  PROPERTY(bool, enable_graph_vmm_pool) = true;
   // alternate NPU graph slots so input preparation can overlap replay
   PROPERTY(bool, enable_graph_double_buffer) = true;
   // enable graph-mode decode without padding
