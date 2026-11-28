@@ -583,4 +583,11 @@ torch::Tensor layer_norm_fwd_aclnn(
     int64_t group_size = -1,
     bool norm_before_gate = true,
     bool is_rms_norm = false);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+t5_split_qkv_append_cache(const torch::Tensor& qkv,
+                          const torch::Tensor& past_key,
+                          const torch::Tensor& past_value,
+                          int64_t head_num,
+                          int64_t head_dim);
 }  // namespace xllm::kernel::npu
